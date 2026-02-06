@@ -5,6 +5,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
+import qrcode from 'qrcode-terminal';
 
 const logger = pino({ level: 'silent' });
 
@@ -15,11 +16,15 @@ export async function connectToWhatsApp(): Promise<WASocket> {
     const sock = makeWASocket({
       auth: state,
       logger,
-      printQRInTerminal: true,
     });
 
     sock.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect } = update;
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        console.log('Scan this QR code with WhatsApp:');
+        qrcode.generate(qr, { small: true });
+      }
 
       if (connection === 'close') {
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
