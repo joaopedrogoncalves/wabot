@@ -1,10 +1,19 @@
-import { loadConfig } from './config.js';
+import { loadConfig, loadChatConfig } from './config.js';
 import { connectToWhatsApp, listGroups } from './whatsapp.js';
 import { fetchBirthdays } from './sheets.js';
 import { startBirthdayCron, checkBirthdays } from './cron.js';
+import { setupChatHandler } from './chat-handler.js';
 
 async function main() {
   const config = loadConfig();
+  const chatConfig = loadChatConfig();
+
+  if (chatConfig) {
+    console.log(`Chatbot enabled for group: ${chatConfig.chatGroupJid}`);
+    setupChatHandler(chatConfig);
+  } else {
+    console.log('Chatbot disabled (CHAT_GROUP_JID or ANTHROPIC_API_KEY not set)');
+  }
 
   console.log('Connecting to WhatsApp...');
   await connectToWhatsApp();

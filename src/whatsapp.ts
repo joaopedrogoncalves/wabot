@@ -12,6 +12,7 @@ const logger = pino({ level: 'silent' });
 let currentSock: WASocket | null = null;
 let connectionOpen = false;
 let connectionOpenResolvers: Array<() => void> = [];
+const connectionReadyCallbacks: Array<(sock: WASocket) => void> = [];
 
 function notifyConnectionOpen(): void {
   connectionOpen = true;
@@ -19,6 +20,10 @@ function notifyConnectionOpen(): void {
     resolve();
   }
   connectionOpenResolvers = [];
+}
+
+export function onConnectionReady(cb: (sock: WASocket) => void): void {
+  connectionReadyCallbacks.push(cb);
 }
 
 export function waitForConnection(): Promise<void> {
@@ -76,6 +81,9 @@ export async function connectToWhatsApp(): Promise<void> {
     if (connection === 'open') {
       console.log('Connected to WhatsApp!');
       notifyConnectionOpen();
+      for (const cb of connectionReadyCallbacks) {
+        cb(sock);
+      }
     }
   });
 

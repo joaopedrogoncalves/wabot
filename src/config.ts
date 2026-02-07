@@ -10,6 +10,15 @@ export interface Config {
   cronSchedule: string;
 }
 
+export interface ChatConfig {
+  chatGroupJid: string;
+  anthropicApiKey: string;
+  systemPrompt: string;
+  botName: string;
+  claudeModel: string;
+  claudeMaxTokens: number;
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -29,5 +38,25 @@ export function loadConfig(): Config {
       process.env['BIRTHDAY_MESSAGE_TEMPLATE'] ||
       '🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!',
     cronSchedule: process.env['CRON_SCHEDULE'] || '* * * * *',
+  };
+}
+
+export function loadChatConfig(): ChatConfig | null {
+  const chatGroupJid = process.env['CHAT_GROUP_JID'];
+  const anthropicApiKey = process.env['ANTHROPIC_API_KEY'];
+
+  if (!chatGroupJid || !anthropicApiKey) {
+    return null;
+  }
+
+  return {
+    chatGroupJid,
+    anthropicApiKey,
+    systemPrompt:
+      process.env['SYSTEM_PROMPT'] ||
+      'You are a helpful assistant in a WhatsApp group chat. Be concise and friendly.',
+    botName: process.env['BOT_NAME'] || 'openclaw',
+    claudeModel: process.env['CLAUDE_MODEL'] || 'claude-sonnet-4-5-20250929',
+    claudeMaxTokens: parseInt(process.env['CLAUDE_MAX_TOKENS'] || '1024', 10),
   };
 }
