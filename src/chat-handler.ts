@@ -2,7 +2,7 @@ import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeyso
 import type { ConfigHolder } from './config.js';
 import { addMessage, getNameToJidMap } from './chat-history.js';
 import { generateResponse } from './llm.js';
-import { onConnectionReady } from './whatsapp.js';
+import { getSocket, onConnectionReady, waitForConnection } from './whatsapp.js';
 
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
   const m = msg.message;
@@ -151,11 +151,14 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
             console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
           }
 
-          await sock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
+          // Use the current socket (may have reconnected during LLM call)
+          await waitForConnection();
+          const currentSock = getSocket();
+          await currentSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
 
           addMessage(remoteJid, {
             senderName: groupConfig.chatbot!.botName,
-            senderJid: botJid ?? '',
+            senderJid: currentSock.user?.id ?? botJid ?? '',
             text: response,
             fromBot: true,
           });
