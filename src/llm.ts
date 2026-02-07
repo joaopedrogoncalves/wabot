@@ -43,7 +43,27 @@ export async function generateResponse(config: AppConfig, groupConfig: GroupConf
     }];
   }
 
+  const groupLabel = groupConfig.name ?? groupJid;
+  console.log(`[llm] Request for "${groupLabel}":`);
+  console.log(`[llm]   model=${params.model}, max_tokens=${params.max_tokens}`);
+  console.log(`[llm]   system="${chatbot.systemPrompt.substring(0, 120)}${chatbot.systemPrompt.length > 120 ? '...' : ''}"`);
+  console.log(`[llm]   messages=${messages.length}, thinking=${chatbot.enableThinking ?? false}, webSearch=${chatbot.enableWebSearch ?? false}${chatbot.enableWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
+  if (params.tools) {
+    console.log(`[llm]   tools=${JSON.stringify(params.tools)}`);
+  }
+
   const response = await anthropic.messages.create(params as any);
+
+  console.log(`[llm] Response for "${groupLabel}": stop_reason=${response.stop_reason}, blocks=${response.content.length}`);
+  for (const block of response.content) {
+    if (block.type === 'text') {
+      console.log(`[llm]   [text] ${block.text.substring(0, 150)}${block.text.length > 150 ? '...' : ''}`);
+    } else if (block.type === 'web_search_tool_result' || block.type === 'server_tool_use') {
+      console.log(`[llm]   [${block.type}] ${JSON.stringify(block).substring(0, 200)}...`);
+    } else {
+      console.log(`[llm]   [${block.type}]`);
+    }
+  }
 
   // Extract all text blocks from the response (skipping thinking/tool blocks)
   const textParts: string[] = [];

@@ -1,5 +1,5 @@
 import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
-import type { AppConfig, GroupConfig } from './config.js';
+import type { ConfigHolder } from './config.js';
 import { addMessage } from './chat-history.js';
 import { generateResponse } from './llm.js';
 import { onConnectionReady } from './whatsapp.js';
@@ -43,16 +43,11 @@ function extractMentionedJids(msg: { message?: Record<string, any> | null }): st
   return ctx?.mentionedJid ?? [];
 }
 
-export function setupChatHandler(config: AppConfig): void {
-  const chatGroups = new Map<string, GroupConfig>();
-  for (const group of config.groups) {
-    if (group.chatbot) {
-      chatGroups.set(group.jid, group);
-    }
-  }
-
+export function setupChatHandler(configHolder: ConfigHolder): void {
   onConnectionReady((sock: WASocket) => {
-    const jids = [...chatGroups.keys()];
+    const jids = configHolder.current.groups
+      .filter((g) => g.chatbot)
+      .map((g) => g.jid);
     console.log(`Chat handler registered for groups: ${jids.join(', ')}`);
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -64,7 +59,8 @@ export function setupChatHandler(config: AppConfig): void {
         const remoteJid = msg.key.remoteJid;
         if (!remoteJid) continue;
 
-        const groupConfig = chatGroups.get(remoteJid);
+        const config = configHolder.current;
+        const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot);
         if (!groupConfig) continue;
 
         const image = await extractImage(msg);
@@ -118,7 +114,7 @@ export function setupChatHandler(config: AppConfig): void {
         console.log(`Chat triggered by ${senderName}: ${text}`);
 
         try {
-          const response = await generateResponse(config, groupConfig, remoteJid);
+          const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
 
           await sock.sendMessage(remoteJid, { text: response }, { quoted: msg });
 

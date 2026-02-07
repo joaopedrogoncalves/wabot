@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { readFileSync, writeFileSync } from 'fs';
+import { randomUUID } from 'crypto';
 
 export interface GlobalConfig {
   anthropicApiKey: string;
@@ -28,6 +29,7 @@ export interface ChatbotGroupConfig {
 export interface GroupConfig {
   jid: string;
   name?: string;
+  webToken?: string;
   birthday?: BirthdayGroupConfig;
   chatbot?: ChatbotGroupConfig;
 }
@@ -36,6 +38,8 @@ export interface AppConfig {
   global: GlobalConfig;
   groups: GroupConfig[];
 }
+
+export type ConfigHolder = { current: AppConfig };
 
 export function loadAppConfig(): AppConfig {
   const configPath = process.env['CONFIG_FILE'] || './groups.json';
@@ -71,6 +75,7 @@ export function loadAppConfig(): AppConfig {
     const group: GroupConfig = {
       jid: g.jid,
       name: g.name,
+      webToken: g.webToken,
     };
 
     if (g.birthday) {
@@ -134,17 +139,20 @@ export function syncGroups(
   const groups: any[] = rawJson.groups ?? [];
   const existingJids = new Set(groups.map((g: any) => g.jid));
 
-  // Update names of existing groups
+  // Update names and ensure webTokens exist
   for (const group of groups) {
     if (whatsappGroups[group.jid]) {
       group.name = whatsappGroups[group.jid];
+    }
+    if (!group.webToken) {
+      group.webToken = randomUUID();
     }
   }
 
   // Append new groups not yet in config
   for (const [jid, name] of Object.entries(whatsappGroups)) {
     if (!existingJids.has(jid)) {
-      groups.push({ jid, name });
+      groups.push({ jid, name, webToken: randomUUID() });
       console.log(`Added new group to config: "${name}" (${jid})`);
     }
   }
@@ -154,4 +162,21 @@ export function syncGroups(
   console.log('Synced group names from WhatsApp into config.');
 
   return loadAppConfig();
+}
+
+export function updateConfigFile(
+  configPath: string,
+  configHolder: ConfigHolder,
+  updater: (rawJson: any) => void,
+): void {
+  const backup = readFileSync(configPath, 'utf-8');
+  try {
+    const rawJson = JSON.parse(backup);
+    updater(rawJson);
+    writeFileSync(configPath, JSON.stringify(rawJson, null, 2) + '\n', 'utf-8');
+    configHolder.current = loadAppConfig();
+  } catch (err) {
+    writeFileSync(configPath, backup, 'utf-8');
+    throw err;
+  }
 }

@@ -1,8 +1,10 @@
 import { syncGroups } from './config.js';
+import type { ConfigHolder } from './config.js';
 import { connectToWhatsApp, listGroups } from './whatsapp.js';
 import { fetchBirthdays } from './sheets.js';
 import { startBirthdayCrons, checkAllBirthdays } from './cron.js';
 import { setupChatHandler } from './chat-handler.js';
+import { startWebServer } from './web/server.js';
 
 async function main() {
   const configPath = process.env['CONFIG_FILE'] || './groups.json';
@@ -13,6 +15,8 @@ async function main() {
   const whatsappGroups = await listGroups();
   const config = syncGroups(configPath, whatsappGroups);
 
+  const configHolder: ConfigHolder = { current: config };
+
   const birthdayGroups = config.groups.filter((g) => g.birthday);
   const chatbotGroups = config.groups.filter((g) => g.chatbot);
 
@@ -21,7 +25,7 @@ async function main() {
   if (chatbotGroups.length > 0) {
     const names = chatbotGroups.map((g) => `${g.name ?? g.jid} (${g.chatbot!.botName})`);
     console.log(`Chatbot enabled for: ${names.join(', ')}`);
-    setupChatHandler(config);
+    setupChatHandler(configHolder);
   } else {
     console.log('No groups with chatbot configured.');
   }
@@ -41,10 +45,17 @@ async function main() {
   }
 
   if (birthdayGroups.length > 0) {
-    await checkAllBirthdays(config);
-    startBirthdayCrons(config);
+    await checkAllBirthdays(configHolder);
+    startBirthdayCrons(configHolder);
   } else {
     console.log('No groups with birthday configured.');
+  }
+
+  // Start web admin if ADMIN_TOKEN is set
+  const adminToken = process.env['ADMIN_TOKEN'];
+  if (adminToken) {
+    const port = parseInt(process.env['WEB_PORT'] ?? '3000', 10);
+    startWebServer(configHolder, configPath, port, adminToken);
   }
 
   console.log('Bot is running. Press Ctrl+C to stop.');

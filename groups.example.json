@@ -7,6 +7,7 @@
     {
       "jid": "120360000000000000@g.us",
       "name": "Family Group",
+      "webToken": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "birthday": {
         "spreadsheetId": "1aBcDeFgHiJkLmNoPqRsTuVwXyZ",
         "sheetName": "Sheet1",
@@ -25,6 +26,7 @@
     {
       "jid": "120360000000000001@g.us",
       "name": "Tech Friends",
+      "webToken": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
       "chatbot": {
         "botName": "techbot",
         "systemPrompt": "You are a tech-savvy assistant."

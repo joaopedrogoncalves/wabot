@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import type { AppConfig, GroupConfig } from './config.js';
+import type { AppConfig, ConfigHolder, GroupConfig } from './config.js';
 import { fetchBirthdays } from './sheets.js';
 import { getTodaysBirthdays, formatBirthdayMessage } from './birthday.js';
 import { sendGroupMessage } from './whatsapp.js';
@@ -33,7 +33,8 @@ export async function checkBirthdaysForGroup(config: AppConfig, group: GroupConf
   }
 }
 
-export async function checkAllBirthdays(config: AppConfig): Promise<void> {
+export async function checkAllBirthdays(configHolder: ConfigHolder): Promise<void> {
+  const config = configHolder.current;
   for (const group of config.groups) {
     if (group.birthday) {
       await checkBirthdaysForGroup(config, group);
@@ -41,8 +42,9 @@ export async function checkAllBirthdays(config: AppConfig): Promise<void> {
   }
 }
 
-export function startBirthdayCrons(config: AppConfig): void {
-  const bySchedule = new Map<string, GroupConfig[]>();
+export function startBirthdayCrons(configHolder: ConfigHolder): void {
+  const config = configHolder.current;
+  const bySchedule = new Map<string, string[]>();
 
   for (const group of config.groups) {
     if (!group.birthday) continue;
@@ -52,16 +54,23 @@ export function startBirthdayCrons(config: AppConfig): void {
       list = [];
       bySchedule.set(schedule, list);
     }
-    list.push(group);
+    list.push(group.jid);
   }
 
-  for (const [schedule, groups] of bySchedule) {
-    const names = groups.map((g) => g.name ?? g.jid).join(', ');
+  for (const [schedule, jids] of bySchedule) {
+    const names = jids.map((jid) => {
+      const g = config.groups.find((gr) => gr.jid === jid);
+      return g?.name ?? jid;
+    }).join(', ');
     console.log(`Scheduling birthday cron "${schedule}" for: ${names}`);
 
     cron.schedule(schedule, () => {
-      for (const group of groups) {
-        checkBirthdaysForGroup(config, group);
+      const currentConfig = configHolder.current;
+      for (const jid of jids) {
+        const group = currentConfig.groups.find((g) => g.jid === jid);
+        if (group?.birthday) {
+          checkBirthdaysForGroup(currentConfig, group);
+        }
       }
     });
   }
