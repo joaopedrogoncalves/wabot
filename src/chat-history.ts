@@ -1,10 +1,12 @@
-import type { MessageParam } from '@anthropic-ai/sdk/resources/messages.js';
+import type { MessageParam, ImageBlockParam, ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.js';
 
 export interface ChatMessage {
   senderName: string;
   senderJid: string;
   text: string;
   fromBot: boolean;
+  imageData?: string;
+  imageMimeType?: string;
 }
 
 const MAX_HISTORY = 50;
@@ -45,14 +47,47 @@ export function toAnthropicMessages(groupJid: string): MessageParam[] {
 
   for (const msg of messages) {
     const role: 'user' | 'assistant' = msg.fromBot ? 'assistant' : 'user';
-    const content = msg.fromBot ? msg.text : `[${msg.senderName}]: ${msg.text}`;
+    const textContent = msg.fromBot ? msg.text : `[${msg.senderName}]: ${msg.text}`;
 
-    const last = result[result.length - 1];
-    if (last && last.role === role) {
-      // Merge consecutive same-role messages
-      last.content = (last.content as string) + '\n' + content;
+    const hasImage = !msg.fromBot && msg.imageData && msg.imageMimeType;
+
+    if (hasImage) {
+      const blocks: ContentBlockParam[] = [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: msg.imageMimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+            data: msg.imageData!,
+          },
+        } satisfies ImageBlockParam,
+      ];
+      if (msg.text) {
+        blocks.push({ type: 'text', text: textContent });
+      }
+
+      const last = result[result.length - 1];
+      if (last && last.role === role) {
+        // Merge: convert existing content to array form if needed, then append
+        const existing = typeof last.content === 'string'
+          ? [{ type: 'text' as const, text: last.content }]
+          : (last.content as ContentBlockParam[]);
+        last.content = [...existing, ...blocks];
+      } else {
+        result.push({ role, content: blocks });
+      }
     } else {
-      result.push({ role, content });
+      const last = result[result.length - 1];
+      if (last && last.role === role) {
+        // Merge consecutive same-role text messages
+        if (typeof last.content === 'string') {
+          last.content = last.content + '\n' + textContent;
+        } else {
+          (last.content as ContentBlockParam[]).push({ type: 'text', text: textContent });
+        }
+      } else {
+        result.push({ role, content: textContent });
+      }
     }
   }
 
