@@ -11,7 +11,7 @@ export interface Config {
 }
 
 export interface ChatConfig {
-  chatGroupJid: string;
+  chatGroupJids: string[];
   anthropicApiKey: string;
   systemPrompt: string;
   botName: string;
@@ -42,15 +42,20 @@ export function loadConfig(): Config {
 }
 
 export function loadChatConfig(): ChatConfig | null {
-  const chatGroupJid = process.env['CHAT_GROUP_JID'];
+  const chatGroupJidRaw = process.env['CHAT_GROUP_JID'];
   const anthropicApiKey = process.env['ANTHROPIC_API_KEY'];
 
-  if (!chatGroupJid || !anthropicApiKey) {
+  if (!chatGroupJidRaw || !anthropicApiKey) {
+    return null;
+  }
+
+  const chatGroupJids = chatGroupJidRaw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (chatGroupJids.length === 0) {
     return null;
   }
 
   return {
-    chatGroupJid,
+    chatGroupJids,
     anthropicApiKey,
     systemPrompt:
       process.env['SYSTEM_PROMPT'] ||

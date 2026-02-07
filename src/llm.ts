@@ -11,9 +11,9 @@ function getClient(apiKey: string): Anthropic {
   return client;
 }
 
-export async function generateResponse(chatConfig: ChatConfig): Promise<string> {
+export async function generateResponse(chatConfig: ChatConfig, groupJid: string): Promise<string> {
   const anthropic = getClient(chatConfig.anthropicApiKey);
-  const messages = toAnthropicMessages();
+  const messages = toAnthropicMessages(groupJid);
 
   if (messages.length === 0) {
     return "I don't have any context yet. How can I help you?";

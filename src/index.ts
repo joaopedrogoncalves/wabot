@@ -9,7 +9,7 @@ async function main() {
   const chatConfig = loadChatConfig();
 
   if (chatConfig) {
-    console.log(`Chatbot enabled for group: ${chatConfig.chatGroupJid}`);
+    console.log(`Chatbot enabled for ${chatConfig.chatGroupJids.length} group(s): ${chatConfig.chatGroupJids.join(', ')}`);
     setupChatHandler(chatConfig);
   } else {
     console.log('Chatbot disabled (CHAT_GROUP_JID or ANTHROPIC_API_KEY not set)');

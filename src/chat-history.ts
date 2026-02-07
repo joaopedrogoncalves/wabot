@@ -8,28 +8,39 @@ export interface ChatMessage {
 }
 
 const MAX_HISTORY = 50;
-const messages: ChatMessage[] = [];
+const historyByGroup = new Map<string, ChatMessage[]>();
 
-export function addMessage(msg: ChatMessage): void {
+function getOrCreateGroup(groupJid: string): ChatMessage[] {
+  let msgs = historyByGroup.get(groupJid);
+  if (!msgs) {
+    msgs = [];
+    historyByGroup.set(groupJid, msgs);
+  }
+  return msgs;
+}
+
+export function addMessage(groupJid: string, msg: ChatMessage): void {
+  const messages = getOrCreateGroup(groupJid);
   messages.push(msg);
   if (messages.length > MAX_HISTORY) {
     messages.splice(0, messages.length - MAX_HISTORY);
   }
 }
 
-export function getHistory(): readonly ChatMessage[] {
-  return messages;
+export function getHistory(groupJid: string): readonly ChatMessage[] {
+  return historyByGroup.get(groupJid) ?? [];
 }
 
-export function clearHistory(): void {
-  messages.length = 0;
+export function clearHistory(groupJid: string): void {
+  historyByGroup.delete(groupJid);
 }
 
 /**
- * Converts the chat history into Anthropic's alternating user/assistant format.
+ * Converts the chat history for a group into Anthropic's alternating user/assistant format.
  * Consecutive messages with the same role are grouped together with sender prefixes.
  */
-export function toAnthropicMessages(): MessageParam[] {
+export function toAnthropicMessages(groupJid: string): MessageParam[] {
+  const messages = historyByGroup.get(groupJid) ?? [];
   const result: MessageParam[] = [];
 
   for (const msg of messages) {

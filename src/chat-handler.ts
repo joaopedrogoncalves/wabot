@@ -18,8 +18,10 @@ function extractMentionedJids(msg: { message?: Record<string, any> | null }): st
 }
 
 export function setupChatHandler(chatConfig: ChatConfig): void {
+  const chatGroupSet = new Set(chatConfig.chatGroupJids);
+
   onConnectionReady((sock: WASocket) => {
-    console.log(`Chat handler registered for group: ${chatConfig.chatGroupJid}`);
+    console.log(`Chat handler registered for groups: ${chatConfig.chatGroupJids.join(', ')}`);
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       console.log(`[chat] messages.upsert: type=${type}, count=${messages.length}`);
@@ -28,8 +30,7 @@ export function setupChatHandler(chatConfig: ChatConfig): void {
 
       for (const msg of messages) {
         const remoteJid = msg.key.remoteJid;
-        console.log(`[chat] message from remoteJid=${remoteJid} (want=${chatConfig.chatGroupJid})`);
-        if (remoteJid !== chatConfig.chatGroupJid) continue;
+        if (!remoteJid || !chatGroupSet.has(remoteJid)) continue;
 
         const text = extractText(msg);
         console.log(`[chat] extractedText=${text ? `"${text}"` : 'null'}, messageKeys=${Object.keys(msg.message ?? {}).join(', ')}`);
@@ -42,7 +43,7 @@ export function setupChatHandler(chatConfig: ChatConfig): void {
         const fromBot = !!botJid && areJidsSameUser(senderJid, botJid);
 
         // Record every message in history
-        addMessage({ senderName, senderJid, text, fromBot });
+        addMessage(remoteJid, { senderName, senderJid, text, fromBot });
 
         // Skip trigger check for bot's own messages
         if (fromBot) continue;
@@ -64,11 +65,11 @@ export function setupChatHandler(chatConfig: ChatConfig): void {
         console.log(`Chat triggered by ${senderName}: ${text}`);
 
         try {
-          const response = await generateResponse(chatConfig);
+          const response = await generateResponse(chatConfig, remoteJid);
 
-          await sock.sendMessage(remoteJid!, { text: response });
+          await sock.sendMessage(remoteJid, { text: response });
 
-          addMessage({
+          addMessage(remoteJid, {
             senderName: chatConfig.botName,
             senderJid: botJid ?? '',
             text: response,

@@ -3,7 +3,7 @@
 A WhatsApp bot with two features:
 
 1. **Birthday Bot** — reads birthdays from a Google Sheet and sends messages to a WhatsApp group on a cron schedule.
-2. **LLM Chatbot** — listens on a separate WhatsApp group and responds via Claude when @mentioned or addressed by name.
+2. **LLM Chatbot** — listens on one or more WhatsApp groups and responds via Claude when @mentioned or addressed by name. Each group maintains its own conversation history.
 
 ## Setup
 
@@ -45,14 +45,14 @@ All configuration is done via environment variables (see `.env.example`).
 
 | Variable | Default | Description |
 |---|---|---|
-| `CHAT_GROUP_JID` | — | WhatsApp group JID for the chatbot |
+| `CHAT_GROUP_JID` | — | WhatsApp group JID(s) for the chatbot (comma-separated for multiple) |
 | `ANTHROPIC_API_KEY` | — | Claude API key |
 | `SYSTEM_PROMPT` | `You are a helpful assistant...` | Bot persona / system prompt |
 | `BOT_NAME` | `openclaw` | Keyword prefix that triggers the bot |
 | `CLAUDE_MODEL` | `claude-sonnet-4-5-20250929` | Anthropic model ID |
 | `CLAUDE_MAX_TOKENS` | `1024` | Max response tokens |
 
-The chatbot triggers when a user either @mentions the bot or starts a message with the `BOT_NAME` keyword. It keeps the last 50 messages in memory as context for Claude.
+The chatbot triggers when a user either @mentions the bot or starts a message with the `BOT_NAME` keyword. Each group keeps its own buffer of the last 50 messages as context for Claude.
 
 ## Project Structure
 
