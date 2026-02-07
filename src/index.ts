@@ -7,9 +7,9 @@ async function main() {
   const config = loadConfig();
 
   console.log('Connecting to WhatsApp...');
-  const sock = await connectToWhatsApp();
+  await connectToWhatsApp();
 
-  await listGroups(sock);
+  await listGroups();
 
   console.log(`Target group: ${config.whatsappGroupJid}`);
   console.log(`Cron schedule: ${config.cronSchedule}`);
@@ -23,10 +23,10 @@ async function main() {
   console.log('--- End Entries ---\n');
 
   // Run an immediate birthday check on startup
-  await checkBirthdays(sock, config);
+  await checkBirthdays(config);
 
   // Start the daily cron job
-  startBirthdayCron(sock, config);
+  startBirthdayCron(config);
 
   console.log('Bot is running. Press Ctrl+C to stop.');
 }

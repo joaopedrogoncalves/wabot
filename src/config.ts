@@ -28,6 +28,6 @@ export function loadConfig(): Config {
     birthdayMessageTemplate:
       process.env['BIRTHDAY_MESSAGE_TEMPLATE'] ||
       '🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!',
-    cronSchedule: process.env['CRON_SCHEDULE'] || '0 8 * * *',
+    cronSchedule: process.env['CRON_SCHEDULE'] || '* * * * *',
   };
 }
