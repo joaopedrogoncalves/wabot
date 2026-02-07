@@ -1,5 +1,5 @@
 import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
-import type { ChatConfig } from './config.js';
+import type { AppConfig, GroupConfig } from './config.js';
 import { addMessage } from './chat-history.js';
 import { generateResponse } from './llm.js';
 import { onConnectionReady } from './whatsapp.js';
@@ -43,11 +43,17 @@ function extractMentionedJids(msg: { message?: Record<string, any> | null }): st
   return ctx?.mentionedJid ?? [];
 }
 
-export function setupChatHandler(chatConfig: ChatConfig): void {
-  const chatGroupSet = new Set(chatConfig.chatGroupJids);
+export function setupChatHandler(config: AppConfig): void {
+  const chatGroups = new Map<string, GroupConfig>();
+  for (const group of config.groups) {
+    if (group.chatbot) {
+      chatGroups.set(group.jid, group);
+    }
+  }
 
   onConnectionReady((sock: WASocket) => {
-    console.log(`Chat handler registered for groups: ${chatConfig.chatGroupJids.join(', ')}`);
+    const jids = [...chatGroups.keys()];
+    console.log(`Chat handler registered for groups: ${jids.join(', ')}`);
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       console.log(`[chat] messages.upsert: type=${type}, count=${messages.length}`);
@@ -56,7 +62,10 @@ export function setupChatHandler(chatConfig: ChatConfig): void {
 
       for (const msg of messages) {
         const remoteJid = msg.key.remoteJid;
-        if (!remoteJid || !chatGroupSet.has(remoteJid)) continue;
+        if (!remoteJid) continue;
+
+        const groupConfig = chatGroups.get(remoteJid);
+        if (!groupConfig) continue;
 
         const image = await extractImage(msg);
         const text = extractText(msg);
@@ -84,7 +93,7 @@ export function setupChatHandler(chatConfig: ChatConfig): void {
         // Image-only messages (no text) are recorded but don't trigger a response
         if (!text) continue;
 
-        // Check triggers: @mention or keyword prefix
+        // Check triggers: @mention, keyword prefix, or reply to bot message
         const mentionedJids = extractMentionedJids(msg);
         const botLid = sock.user?.lid;
         console.log(`[chat] mentionedJids=${JSON.stringify(mentionedJids)}, botJid=${botJid}, botLid=${botLid}`);
@@ -94,19 +103,27 @@ export function setupChatHandler(chatConfig: ChatConfig): void {
         );
         const prefixTriggered = text
           .toLowerCase()
-          .startsWith(chatConfig.botName.toLowerCase());
+          .startsWith(groupConfig.chatbot!.botName.toLowerCase());
 
-        if (!mentionTriggered && !prefixTriggered) continue;
+        const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant
+          ?? msg.message?.imageMessage?.contextInfo?.participant
+          ?? msg.message?.videoMessage?.contextInfo?.participant;
+        const replyTriggered = !!quotedParticipant && (
+          (!!botJid && areJidsSameUser(quotedParticipant, botJid)) ||
+          (!!botLid && areJidsSameUser(quotedParticipant, botLid))
+        );
+
+        if (!mentionTriggered && !prefixTriggered && !replyTriggered) continue;
 
         console.log(`Chat triggered by ${senderName}: ${text}`);
 
         try {
-          const response = await generateResponse(chatConfig, remoteJid);
+          const response = await generateResponse(config, groupConfig, remoteJid);
 
-          await sock.sendMessage(remoteJid, { text: response });
+          await sock.sendMessage(remoteJid, { text: response }, { quoted: msg });
 
           addMessage(remoteJid, {
-            senderName: chatConfig.botName,
+            senderName: groupConfig.chatbot!.botName,
             senderJid: botJid ?? '',
             text: response,
             fromBot: true,

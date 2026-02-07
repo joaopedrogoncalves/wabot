@@ -23,7 +23,11 @@ function notifyConnectionOpen(): void {
 }
 
 export function onConnectionReady(cb: (sock: WASocket) => void): void {
-  connectionReadyCallbacks.push(cb);
+  if (connectionOpen && currentSock) {
+    cb(currentSock);
+  } else {
+    connectionReadyCallbacks.push(cb);
+  }
 }
 
 export function waitForConnection(): Promise<void> {
@@ -102,13 +106,16 @@ export async function sendGroupMessage(
   await sock.sendMessage(groupJid, { text });
 }
 
-export async function listGroups(): Promise<void> {
+export async function listGroups(): Promise<Record<string, string>> {
   await waitForConnection();
   const sock = getSocket();
   const groups = await sock.groupFetchAllParticipating();
+  const result: Record<string, string> = {};
   console.log('\n--- Groups ---');
   for (const [jid, metadata] of Object.entries(groups)) {
     console.log(`  ${metadata.subject} → ${jid}`);
+    result[jid] = metadata.subject;
   }
   console.log('--- End Groups ---\n');
+  return result;
 }

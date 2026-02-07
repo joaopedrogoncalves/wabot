@@ -1,25 +1,25 @@
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
-import type { Config } from './config.js';
+import type { GlobalConfig, BirthdayGroupConfig } from './config.js';
 
 export interface BirthdayRow {
   name: string;
   date: string;
 }
 
-export async function fetchBirthdays(config: Config): Promise<BirthdayRow[]> {
+export async function fetchBirthdays(global: GlobalConfig, birthday: BirthdayGroupConfig): Promise<BirthdayRow[]> {
   const auth = new JWT({
-    email: config.googleServiceAccountEmail,
-    key: config.googlePrivateKey,
+    email: global.googleServiceAccountEmail,
+    key: global.googlePrivateKey,
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
 
-  const doc = new GoogleSpreadsheet(config.spreadsheetId, auth);
+  const doc = new GoogleSpreadsheet(birthday.spreadsheetId, auth);
   await doc.loadInfo();
 
-  const sheet = doc.sheetsByTitle[config.sheetName];
+  const sheet = doc.sheetsByTitle[birthday.sheetName];
   if (!sheet) {
-    throw new Error(`Sheet "${config.sheetName}" not found in spreadsheet`);
+    throw new Error(`Sheet "${birthday.sheetName}" not found in spreadsheet`);
   }
 
   const rows = await sheet.getRows();

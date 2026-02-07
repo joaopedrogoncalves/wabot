@@ -1,41 +1,51 @@
-import { loadConfig, loadChatConfig } from './config.js';
+import { syncGroups } from './config.js';
 import { connectToWhatsApp, listGroups } from './whatsapp.js';
 import { fetchBirthdays } from './sheets.js';
-import { startBirthdayCron, checkBirthdays } from './cron.js';
+import { startBirthdayCrons, checkAllBirthdays } from './cron.js';
 import { setupChatHandler } from './chat-handler.js';
 
 async function main() {
-  const config = loadConfig();
-  const chatConfig = loadChatConfig();
-
-  if (chatConfig) {
-    console.log(`Chatbot enabled for ${chatConfig.chatGroupJids.length} group(s): ${chatConfig.chatGroupJids.join(', ')}`);
-    setupChatHandler(chatConfig);
-  } else {
-    console.log('Chatbot disabled (CHAT_GROUP_JID or ANTHROPIC_API_KEY not set)');
-  }
+  const configPath = process.env['CONFIG_FILE'] || './groups.json';
 
   console.log('Connecting to WhatsApp...');
   await connectToWhatsApp();
 
-  await listGroups();
+  const whatsappGroups = await listGroups();
+  const config = syncGroups(configPath, whatsappGroups);
 
-  console.log(`Target group: ${config.whatsappGroupJid}`);
-  console.log(`Cron schedule: ${config.cronSchedule}`);
+  const birthdayGroups = config.groups.filter((g) => g.birthday);
+  const chatbotGroups = config.groups.filter((g) => g.chatbot);
 
-  // Print all spreadsheet entries for verification
-  const rows = await fetchBirthdays(config);
-  console.log(`\n--- Spreadsheet Entries (${rows.length}) ---`);
-  for (const row of rows) {
-    console.log(`  ${row.name} → ${row.date}`);
+  console.log(`Loaded ${config.groups.length} group(s): ${birthdayGroups.length} with birthday, ${chatbotGroups.length} with chatbot`);
+
+  if (chatbotGroups.length > 0) {
+    const names = chatbotGroups.map((g) => `${g.name ?? g.jid} (${g.chatbot!.botName})`);
+    console.log(`Chatbot enabled for: ${names.join(', ')}`);
+    setupChatHandler(config);
+  } else {
+    console.log('No groups with chatbot configured.');
   }
-  console.log('--- End Entries ---\n');
 
-  // Run an immediate birthday check on startup
-  await checkBirthdays(config);
+  for (const group of birthdayGroups) {
+    const label = group.name ?? group.jid;
+    try {
+      const rows = await fetchBirthdays(config.global, group.birthday!);
+      console.log(`\n--- Spreadsheet Entries for "${label}" (${rows.length}) ---`);
+      for (const row of rows) {
+        console.log(`  ${row.name} → ${row.date}`);
+      }
+      console.log('--- End Entries ---\n');
+    } catch (error) {
+      console.error(`Failed to fetch birthdays for "${label}":`, error);
+    }
+  }
 
-  // Start the daily cron job
-  startBirthdayCron(config);
+  if (birthdayGroups.length > 0) {
+    await checkAllBirthdays(config);
+    startBirthdayCrons(config);
+  } else {
+    console.log('No groups with birthday configured.');
+  }
 
   console.log('Bot is running. Press Ctrl+C to stop.');
 }
