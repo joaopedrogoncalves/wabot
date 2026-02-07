@@ -38,6 +38,21 @@ export function clearHistory(groupJid: string): void {
 }
 
 /**
+ * Returns a map of lowercase sender name → senderJid for a group,
+ * using the most recent JID seen for each name.
+ */
+export function getNameToJidMap(groupJid: string): Map<string, string> {
+  const messages = historyByGroup.get(groupJid) ?? [];
+  const map = new Map<string, string>();
+  for (const msg of messages) {
+    if (!msg.fromBot && msg.senderName && msg.senderJid) {
+      map.set(msg.senderName.toLowerCase(), msg.senderJid);
+    }
+  }
+  return map;
+}
+
+/**
  * Converts the chat history for a group into Anthropic's alternating user/assistant format.
  * Consecutive messages with the same role are grouped together with sender prefixes.
  */

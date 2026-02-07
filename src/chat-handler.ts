@@ -1,6 +1,6 @@
 import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
 import type { ConfigHolder } from './config.js';
-import { addMessage } from './chat-history.js';
+import { addMessage, getNameToJidMap } from './chat-history.js';
 import { generateResponse } from './llm.js';
 import { onConnectionReady } from './whatsapp.js';
 
@@ -59,6 +59,10 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const remoteJid = msg.key.remoteJid;
         if (!remoteJid) continue;
 
+        const rawSender = msg.pushName ?? msg.key.participant ?? msg.key.remoteJid ?? '?';
+        const rawText = extractText(msg);
+        console.log(`[chat] MSG from=${rawSender} jid=${remoteJid} participant=${msg.key.participant ?? 'N/A'} text=${rawText ? `"${rawText.slice(0, 80)}"` : '(no text)'}`);
+
         const config = configHolder.current;
         const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot);
         if (!groupConfig) continue;
@@ -116,7 +120,38 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         try {
           const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
 
-          await sock.sendMessage(remoteJid, { text: response }, { quoted: msg });
+          // Resolve @Name or @number mentions in the response to JIDs
+          const nameToJid = getNameToJidMap(remoteJid);
+          // Also build a number→jid map (e.g. "80033108471912" → "80033108471912:1@lid")
+          const numberToJid = new Map<string, string>();
+          for (const jid of nameToJid.values()) {
+            const num = jid.replace(/[:@].+$/, '');
+            numberToJid.set(num, jid);
+          }
+
+          const mentions: string[] = [];
+          const mentionRegex = /@([\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ]*[\p{L}\p{M}\p{N}]|[\p{L}\p{M}\p{N}]+)/gu;
+          let responseText = response;
+          // Process matches in reverse order so replacements don't shift indices
+          const matches = [...response.matchAll(mentionRegex)].reverse();
+          for (const match of matches) {
+            const captured = match[1];
+            // Try name lookup first, then number lookup
+            const jid = nameToJid.get(captured.toLowerCase()) ?? numberToJid.get(captured);
+            if (jid && !mentions.includes(jid)) {
+              mentions.push(jid);
+            }
+            if (jid) {
+              // Replace @Name with @number for WhatsApp to render the mention
+              const num = jid.replace(/[:@].+$/, '');
+              responseText = responseText.slice(0, match.index!) + '@' + num + responseText.slice(match.index! + match[0].length);
+            }
+          }
+          if (mentions.length > 0) {
+            console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
+          }
+
+          await sock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
 
           addMessage(remoteJid, {
             senderName: groupConfig.chatbot!.botName,
