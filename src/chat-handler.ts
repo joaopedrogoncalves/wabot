@@ -118,6 +118,8 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         console.log(`Chat triggered by ${senderName}: ${text}`);
 
         try {
+          await sock.sendPresenceUpdate('composing', remoteJid);
+
           const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
 
           // Resolve @Name or @number mentions in the response to JIDs
@@ -154,6 +156,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           // Use the current socket (may have reconnected during LLM call)
           await waitForConnection();
           const currentSock = getSocket();
+          await currentSock.sendPresenceUpdate('paused', remoteJid);
           await currentSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
 
           addMessage(remoteJid, {
