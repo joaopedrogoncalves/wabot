@@ -46,12 +46,27 @@ export function getSocket(): WASocket {
   return currentSock;
 }
 
+let cachedAuth: { state: Awaited<ReturnType<typeof useMultiFileAuthState>>['state']; saveCreds: () => Promise<void> } | null = null;
+
+async function getAuthState() {
+  if (!cachedAuth) {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    cachedAuth = { state, saveCreds };
+  }
+  return cachedAuth;
+}
+
 export async function connectToWhatsApp(): Promise<void> {
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+  const { state, saveCreds } = await getAuthState();
 
   const sock = makeWASocket({
     auth: state,
     logger,
+    keepAliveIntervalMs: 45_000,
+    connectTimeoutMs: 30_000,
+    defaultQueryTimeoutMs: 120_000,
+    retryRequestDelayMs: 500,
+    markOnlineOnConnect: false,
   });
 
   currentSock = sock;
@@ -75,7 +90,8 @@ export async function connectToWhatsApp(): Promise<void> {
       );
 
       if (shouldReconnect) {
-        connectToWhatsApp();
+        // Small delay to avoid rapid reconnect loops on flaky network
+        setTimeout(() => connectToWhatsApp(), 2_000);
       } else {
         console.log('Logged out from WhatsApp. Please delete auth_info_baileys/ and restart.');
         process.exit(1);
