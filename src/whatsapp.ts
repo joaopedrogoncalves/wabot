@@ -47,6 +47,8 @@ export function getSocket(): WASocket {
 }
 
 let cachedAuth: { state: Awaited<ReturnType<typeof useMultiFileAuthState>>['state']; saveCreds: () => Promise<void> } | null = null;
+let reconnectDelay = 2_000;
+const MAX_RECONNECT_DELAY = 60_000;
 
 async function getAuthState() {
   if (!cachedAuth) {
@@ -58,6 +60,15 @@ async function getAuthState() {
 
 export async function connectToWhatsApp(): Promise<void> {
   const { state, saveCreds } = await getAuthState();
+
+  // Clean up previous socket if it exists
+  if (currentSock) {
+    currentSock.ev.removeAllListeners('connection.update');
+    currentSock.ev.removeAllListeners('creds.update');
+    currentSock.ev.removeAllListeners('messages.upsert');
+    currentSock.end(undefined);
+    currentSock = null;
+  }
 
   const sock = makeWASocket({
     auth: state,
@@ -86,12 +97,13 @@ export async function connectToWhatsApp(): Promise<void> {
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
       console.log(
-        `Connection closed (status ${statusCode}). Reconnecting: ${shouldReconnect}`
+        `Connection closed (status ${statusCode}). Reconnecting in ${reconnectDelay / 1000}s...`
       );
 
       if (shouldReconnect) {
-        // Small delay to avoid rapid reconnect loops on flaky network
-        setTimeout(() => connectToWhatsApp(), 2_000);
+        setTimeout(() => connectToWhatsApp(), reconnectDelay);
+        // Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s max
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
       } else {
         console.log('Logged out from WhatsApp. Please delete auth_info_baileys/ and restart.');
         process.exit(1);
@@ -100,6 +112,7 @@ export async function connectToWhatsApp(): Promise<void> {
 
     if (connection === 'open') {
       console.log('Connected to WhatsApp!');
+      reconnectDelay = 2_000; // Reset backoff on successful connection
       notifyConnectionOpen();
       for (const cb of connectionReadyCallbacks) {
         cb(sock);
