@@ -50,6 +50,43 @@ let cachedAuth: { state: Awaited<ReturnType<typeof useMultiFileAuthState>>['stat
 let reconnectDelay = 2_000;
 const MAX_RECONNECT_DELAY = 60_000;
 
+// Heartbeat: periodically check connection health
+const HEARTBEAT_INTERVAL = 12 * 60 * 1000; // 12 minutes
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function startHeartbeat(): void {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(async () => {
+    if (!connectionOpen || !currentSock) {
+      console.log('[heartbeat] Skipping — not connected');
+      return;
+    }
+    try {
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('timed out')), 15_000)
+      );
+      await Promise.race([
+        currentSock.sendPresenceUpdate('unavailable'),
+        timeout,
+      ]);
+      console.log('[heartbeat] Connection alive');
+    } catch (err) {
+      console.error(`[heartbeat] Check failed (${err}). Forcing reconnect...`);
+      connectionOpen = false;
+      stopHeartbeat();
+      try { currentSock?.end(undefined); } catch {}
+      connectToWhatsApp();
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
 async function getAuthState() {
   if (!cachedAuth) {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -93,6 +130,7 @@ export async function connectToWhatsApp(): Promise<void> {
 
     if (connection === 'close') {
       connectionOpen = false;
+      stopHeartbeat();
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
@@ -113,6 +151,7 @@ export async function connectToWhatsApp(): Promise<void> {
     if (connection === 'open') {
       console.log('Connected to WhatsApp!');
       reconnectDelay = 2_000; // Reset backoff on successful connection
+      startHeartbeat();
       notifyConnectionOpen();
       for (const cb of connectionReadyCallbacks) {
         cb(sock);

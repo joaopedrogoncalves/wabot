@@ -1,3 +1,4 @@
+import './log.js';
 import { syncGroups } from './config.js';
 import type { ConfigHolder } from './config.js';
 import { connectToWhatsApp, listGroups } from './whatsapp.js';
