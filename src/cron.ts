@@ -1,54 +1,55 @@
 import cron from 'node-cron';
 import type { AppConfig, ConfigHolder, GroupConfig } from './config.js';
-import { fetchBirthdays } from './sheets.js';
-import { getTodaysBirthdays, formatBirthdayMessage } from './birthday.js';
+import { fetchEventRows } from './sheets.js';
+import { getTodaysEvents, formatEventMessage } from './events.js';
 import { sendGroupMessage } from './whatsapp.js';
 
-export async function checkBirthdaysForGroup(config: AppConfig, group: GroupConfig): Promise<void> {
-  const birthday = group.birthday;
-  if (!birthday) return;
+export async function checkEventsForGroup(config: AppConfig, group: GroupConfig): Promise<void> {
+  const events = group.events;
+  if (!events) return;
 
-  const label = group.name ?? group.jid;
+  const groupLabel = group.name ?? group.jid;
+  const eventsLabel = events.label ?? 'events';
   try {
-    console.log(`Checking birthdays for "${label}"...`);
-    const rows = await fetchBirthdays(config.global, birthday);
-    console.log(`Fetched ${rows.length} entries from spreadsheet for "${label}"`);
+    console.log(`Checking ${eventsLabel} for "${groupLabel}"...`);
+    const rows = await fetchEventRows(config.global, events);
+    console.log(`Fetched ${rows.length} entries from spreadsheet for "${groupLabel}"`);
 
-    const names = getTodaysBirthdays(rows);
+    const names = getTodaysEvents(rows);
 
     if (names.length === 0) {
-      console.log(`No birthdays today for "${label}".`);
+      console.log(`No ${eventsLabel} today for "${groupLabel}".`);
       return;
     }
 
-    console.log(`Found ${names.length} birthday(s) today for "${label}": ${names.join(', ')}`);
+    console.log(`Found ${names.length} ${eventsLabel} today for "${groupLabel}": ${names.join(', ')}`);
 
     for (const name of names) {
-      const message = formatBirthdayMessage(name, birthday.messageTemplate);
+      const message = formatEventMessage(name, events.messageTemplate);
       await sendGroupMessage(group.jid, message);
-      console.log(`Sent birthday message for ${name} to "${label}"`);
+      console.log(`Sent ${eventsLabel} message for ${name} to "${groupLabel}"`);
     }
   } catch (error) {
-    console.error(`Error during birthday check for "${label}":`, error);
+    console.error(`Error during ${eventsLabel} check for "${groupLabel}":`, error);
   }
 }
 
-export async function checkAllBirthdays(configHolder: ConfigHolder): Promise<void> {
+export async function checkAllEvents(configHolder: ConfigHolder): Promise<void> {
   const config = configHolder.current;
   for (const group of config.groups) {
-    if (group.birthday) {
-      await checkBirthdaysForGroup(config, group);
+    if (group.events) {
+      await checkEventsForGroup(config, group);
     }
   }
 }
 
-export function startBirthdayCrons(configHolder: ConfigHolder): void {
+export function startEventCrons(configHolder: ConfigHolder): void {
   const config = configHolder.current;
   const bySchedule = new Map<string, string[]>();
 
   for (const group of config.groups) {
-    if (!group.birthday) continue;
-    const schedule = group.birthday.cronSchedule;
+    if (!group.events) continue;
+    const schedule = group.events.cronSchedule;
     let list = bySchedule.get(schedule);
     if (!list) {
       list = [];
@@ -62,14 +63,14 @@ export function startBirthdayCrons(configHolder: ConfigHolder): void {
       const g = config.groups.find((gr) => gr.jid === jid);
       return g?.name ?? jid;
     }).join(', ');
-    console.log(`Scheduling birthday cron "${schedule}" for: ${names}`);
+    console.log(`Scheduling events cron "${schedule}" for: ${names}`);
 
     cron.schedule(schedule, () => {
       const currentConfig = configHolder.current;
       for (const jid of jids) {
         const group = currentConfig.groups.find((g) => g.jid === jid);
-        if (group?.birthday) {
-          checkBirthdaysForGroup(currentConfig, group);
+        if (group?.events) {
+          checkEventsForGroup(currentConfig, group);
         }
       }
     });

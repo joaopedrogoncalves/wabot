@@ -10,11 +10,12 @@ export interface GlobalConfig {
   claudeMaxTokens: number;
 }
 
-export interface BirthdayGroupConfig {
+export interface EventsConfig {
   spreadsheetId: string;
   sheetName: string;
   messageTemplate: string;
   cronSchedule: string;
+  label?: string;
 }
 
 export interface ChatbotGroupConfig {
@@ -30,7 +31,7 @@ export interface GroupConfig {
   jid: string;
   name?: string;
   webToken?: string;
-  birthday?: BirthdayGroupConfig;
+  events?: EventsConfig;
   chatbot?: ChatbotGroupConfig;
 }
 
@@ -78,22 +79,24 @@ export function loadAppConfig(): AppConfig {
       webToken: g.webToken,
     };
 
-    if (g.birthday) {
-      if (!g.birthday.spreadsheetId) {
-        throw new Error(`Group "${g.name ?? g.jid}" has birthday config but missing "spreadsheetId"`);
+    const eventsRaw = g.events ?? g.birthday;
+    if (eventsRaw) {
+      if (!eventsRaw.spreadsheetId) {
+        throw new Error(`Group "${g.name ?? g.jid}" has events config but missing "spreadsheetId"`);
       }
       if (!googleServiceAccountEmail || !googlePrivateKey) {
         throw new Error(
-          `Group "${g.name ?? g.jid}" has birthday config but GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY is not set`,
+          `Group "${g.name ?? g.jid}" has events config but GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY is not set`,
         );
       }
-      group.birthday = {
-        spreadsheetId: g.birthday.spreadsheetId,
-        sheetName: g.birthday.sheetName ?? 'Sheet1',
+      group.events = {
+        spreadsheetId: eventsRaw.spreadsheetId,
+        sheetName: eventsRaw.sheetName ?? 'Sheet1',
         messageTemplate:
-          g.birthday.messageTemplate ??
+          eventsRaw.messageTemplate ??
           '🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!',
-        cronSchedule: g.birthday.cronSchedule ?? '0 8 * * *',
+        cronSchedule: eventsRaw.cronSchedule ?? '0 8 * * *',
+        label: eventsRaw.label ?? 'events',
       };
     }
 

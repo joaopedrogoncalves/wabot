@@ -68,16 +68,16 @@ ${bodyHtml}
 export function renderAdminDashboard(config: AppConfig, adminToken: string): string {
   const rows = config.groups.map((g) => {
     const name = esc(g.name ?? g.jid);
-    const hasBirthday = g.birthday ? '<span class="badge badge-green">birthday</span>' : '';
+    const hasEvents = g.events ? '<span class="badge badge-green">events</span>' : '';
     const hasChatbot = g.chatbot ? '<span class="badge badge-green">chatbot</span>' : '';
-    const noneLabel = !g.birthday && !g.chatbot ? '<span class="badge badge-gray">none</span>' : '';
+    const noneLabel = !g.events && !g.chatbot ? '<span class="badge badge-gray">none</span>' : '';
     const groupUrl = g.webToken ? `/group/${esc(g.webToken)}` : '';
     const groupLink = groupUrl
       ? `<div class="group-link">Per-group link: <a href="${groupUrl}">${groupUrl}</a></div>`
       : '';
     return `<tr>
       <td>${name}<br><small style="color:#888">${esc(g.jid)}</small>${groupLink}</td>
-      <td>${hasBirthday} ${hasChatbot} ${noneLabel}</td>
+      <td>${hasEvents} ${hasChatbot} ${noneLabel}</td>
       <td><a href="/admin/group/${encodeURIComponent(g.jid)}?token=${esc(adminToken)}" class="btn btn-primary">Edit</a></td>
     </tr>`;
   }).join('\n');
@@ -129,7 +129,7 @@ export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): st
 
 export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, baseUrl: string): string {
   const chatbot = group.chatbot;
-  const birthday = group.birthday;
+  const events = group.events;
   const groupUrl = group.webToken ? `${baseUrl}/group/${group.webToken}` : '';
 
   const body = `
@@ -177,24 +177,24 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
         <label>Max Searches</label>
         <input type="number" name="maxSearches" value="${chatbot?.maxSearches ?? 3}" min="1">
 
-        <h2 style="margin-top:1.5rem">Birthday Settings</h2>
+        <h2 style="margin-top:1.5rem">Events Settings</h2>
 
         <div class="checkbox-row">
-          <input type="checkbox" id="birthdayEnabled" name="birthdayEnabled" value="1" ${birthday ? 'checked' : ''}>
-          <label for="birthdayEnabled">Enable Birthday</label>
+          <input type="checkbox" id="birthdayEnabled" name="birthdayEnabled" value="1" ${events ? 'checked' : ''}>
+          <label for="birthdayEnabled">Enable Events</label>
         </div>
 
         <label>Spreadsheet ID</label>
-        <input type="text" name="spreadsheetId" value="${esc(birthday?.spreadsheetId ?? '')}">
+        <input type="text" name="spreadsheetId" value="${esc(events?.spreadsheetId ?? '')}">
 
         <label>Sheet Name</label>
-        <input type="text" name="sheetName" value="${esc(birthday?.sheetName ?? 'Sheet1')}">
+        <input type="text" name="sheetName" value="${esc(events?.sheetName ?? 'Sheet1')}">
 
         <label>Message Template</label>
-        <textarea name="messageTemplate">${esc(birthday?.messageTemplate ?? '')}</textarea>
+        <textarea name="messageTemplate">${esc(events?.messageTemplate ?? '')}</textarea>
 
         <label>Cron Schedule</label>
-        <input type="text" name="cronSchedule" value="${esc(birthday?.cronSchedule ?? '0 8 * * *')}">
+        <input type="text" name="cronSchedule" value="${esc(events?.cronSchedule ?? '0 8 * * *')}">
 
         <br><br>
         <button type="submit" class="btn btn-primary">Save</button>

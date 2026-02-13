@@ -2,8 +2,8 @@ import './log.js';
 import { syncGroups } from './config.js';
 import type { ConfigHolder } from './config.js';
 import { connectToWhatsApp, listGroups } from './whatsapp.js';
-import { fetchBirthdays } from './sheets.js';
-import { startBirthdayCrons, checkAllBirthdays } from './cron.js';
+import { fetchEventRows } from './sheets.js';
+import { startEventCrons, checkAllEvents } from './cron.js';
 import { setupChatHandler } from './chat-handler.js';
 import { startWebServer } from './web/server.js';
 
@@ -18,10 +18,10 @@ async function main() {
 
   const configHolder: ConfigHolder = { current: config };
 
-  const birthdayGroups = config.groups.filter((g) => g.birthday);
+  const eventGroups = config.groups.filter((g) => g.events);
   const chatbotGroups = config.groups.filter((g) => g.chatbot);
 
-  console.log(`Loaded ${config.groups.length} group(s): ${birthdayGroups.length} with birthday, ${chatbotGroups.length} with chatbot`);
+  console.log(`Loaded ${config.groups.length} group(s): ${eventGroups.length} with events, ${chatbotGroups.length} with chatbot`);
 
   if (chatbotGroups.length > 0) {
     const names = chatbotGroups.map((g) => `${g.name ?? g.jid} (${g.chatbot!.botName})`);
@@ -31,25 +31,25 @@ async function main() {
     console.log('No groups with chatbot configured.');
   }
 
-  for (const group of birthdayGroups) {
+  for (const group of eventGroups) {
     const label = group.name ?? group.jid;
     try {
-      const rows = await fetchBirthdays(config.global, group.birthday!);
+      const rows = await fetchEventRows(config.global, group.events!);
       console.log(`\n--- Spreadsheet Entries for "${label}" (${rows.length}) ---`);
       for (const row of rows) {
         console.log(`  ${row.name} → ${row.date}`);
       }
       console.log('--- End Entries ---\n');
     } catch (error) {
-      console.error(`Failed to fetch birthdays for "${label}":`, error);
+      console.error(`Failed to fetch events for "${label}":`, error);
     }
   }
 
-  if (birthdayGroups.length > 0) {
-    await checkAllBirthdays(configHolder);
-    startBirthdayCrons(configHolder);
+  if (eventGroups.length > 0) {
+    await checkAllEvents(configHolder);
+    startEventCrons(configHolder);
   } else {
-    console.log('No groups with birthday configured.');
+    console.log('No groups with events configured.');
   }
 
   // Start web admin if ADMIN_TOKEN is set

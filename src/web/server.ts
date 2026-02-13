@@ -86,14 +86,16 @@ export function startWebServer(
           delete group.chatbot;
         }
 
-        // Birthday settings
+        // Events settings
         if (req.body.birthdayEnabled) {
-          if (!group.birthday) group.birthday = {};
-          group.birthday.spreadsheetId = req.body.spreadsheetId || group.birthday.spreadsheetId;
-          group.birthday.sheetName = req.body.sheetName || 'Sheet1';
-          group.birthday.messageTemplate = req.body.messageTemplate || group.birthday.messageTemplate;
-          group.birthday.cronSchedule = req.body.cronSchedule || group.birthday.cronSchedule || '0 8 * * *';
+          if (!group.events) group.events = {};
+          group.events.spreadsheetId = req.body.spreadsheetId || group.events.spreadsheetId;
+          group.events.sheetName = req.body.sheetName || 'Sheet1';
+          group.events.messageTemplate = req.body.messageTemplate || group.events.messageTemplate;
+          group.events.cronSchedule = req.body.cronSchedule || group.events.cronSchedule || '0 8 * * *';
+          delete group.birthday;
         } else {
+          delete group.events;
           delete group.birthday;
         }
       });
