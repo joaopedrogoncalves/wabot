@@ -67,7 +67,13 @@ function forceReconnect(reason: string): void {
   console.error(`[heartbeat] ${reason}. Forcing reconnect...`);
   connectionOpen = false;
   stopHeartbeat();
-  try { currentSock?.end(undefined); } catch {}
+  if (currentSock) {
+    currentSock.ev.removeAllListeners('connection.update');
+    currentSock.ev.removeAllListeners('creds.update');
+    currentSock.ev.removeAllListeners('messages.upsert');
+    try { currentSock.end(undefined); } catch {}
+    currentSock = null;
+  }
   connectToWhatsApp();
 }
 
