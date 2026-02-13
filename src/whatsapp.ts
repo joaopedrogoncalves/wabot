@@ -50,15 +50,25 @@ let cachedAuth: { state: Awaited<ReturnType<typeof useMultiFileAuthState>>['stat
 let reconnectDelay = 2_000;
 const MAX_RECONNECT_DELAY = 60_000;
 
-// Heartbeat: periodically check connection health
+// Heartbeat: periodically check connection health and message flow
 const HEARTBEAT_INTERVAL = 12 * 60 * 1000; // 12 minutes
+const MESSAGE_STALE_THRESHOLD = 30 * 60 * 1000; // 30 minutes without message events = stale
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let lastMessageEventAt = Date.now();
 
 function stopHeartbeat(): void {
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
+}
+
+function forceReconnect(reason: string): void {
+  console.error(`[heartbeat] ${reason}. Forcing reconnect...`);
+  connectionOpen = false;
+  stopHeartbeat();
+  try { currentSock?.end(undefined); } catch {}
+  connectToWhatsApp();
 }
 
 function startHeartbeat(): void {
@@ -68,21 +78,26 @@ function startHeartbeat(): void {
       console.log('[heartbeat] Skipping — not connected');
       return;
     }
+
+    // Check 1: Has the message stream gone silent?
+    const silentMinutes = Math.round((Date.now() - lastMessageEventAt) / 60_000);
+    if (Date.now() - lastMessageEventAt > MESSAGE_STALE_THRESHOLD) {
+      forceReconnect(`No message events for ${silentMinutes}min — stream appears dead`);
+      return;
+    }
+
+    // Check 2: Can we do a server round-trip? (fetchBlocklist requires a response)
     try {
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('timed out')), 15_000)
       );
       await Promise.race([
-        currentSock.sendPresenceUpdate('unavailable'),
+        currentSock.fetchBlocklist(),
         timeout,
       ]);
-      console.log('[heartbeat] Connection alive');
+      console.log(`[heartbeat] Connection alive (last msg event ${silentMinutes}min ago)`);
     } catch (err) {
-      console.error(`[heartbeat] Check failed (${err}). Forcing reconnect...`);
-      connectionOpen = false;
-      stopHeartbeat();
-      try { currentSock?.end(undefined); } catch {}
-      connectToWhatsApp();
+      forceReconnect(`Server query failed (${err})`);
     }
   }, HEARTBEAT_INTERVAL);
 }
@@ -120,6 +135,11 @@ export async function connectToWhatsApp(): Promise<void> {
   currentSock = sock;
   connectionOpen = false;
 
+  // Track message event activity for staleness detection
+  sock.ev.on('messages.upsert', () => {
+    lastMessageEventAt = Date.now();
+  });
+
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -151,6 +171,7 @@ export async function connectToWhatsApp(): Promise<void> {
     if (connection === 'open') {
       console.log('Connected to WhatsApp!');
       reconnectDelay = 2_000; // Reset backoff on successful connection
+      lastMessageEventAt = Date.now(); // Reset so we don't immediately trigger staleness
       startHeartbeat();
       notifyConnectionOpen();
       for (const cb of connectionReadyCallbacks) {
