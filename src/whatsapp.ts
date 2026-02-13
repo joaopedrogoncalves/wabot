@@ -14,6 +14,21 @@ let connectionOpen = false;
 let connectionOpenResolvers: Array<() => void> = [];
 const connectionReadyCallbacks: Array<(sock: WASocket) => void> = [];
 
+// Connection tracking
+let socketId = 0;
+let connectedSince: number | null = null;
+let reconnectCount = 0;
+
+function formatUptime(since: number | null): string {
+  if (!since) return 'n/a';
+  const sec = Math.round((Date.now() - since) / 1000);
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60}s`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return `${h}h${m}m`;
+}
+
 function notifyConnectionOpen(): void {
   connectionOpen = true;
   for (const resolve of connectionOpenResolvers) {
@@ -62,7 +77,7 @@ function stopHeartbeat(): void {
 }
 
 function forceReconnect(reason: string): void {
-  console.error(`[heartbeat] ${reason}. Forcing reconnect...`);
+  console.error(`[wa#${socketId}] ${reason}. Forcing reconnect...`);
   connectionOpen = false;
   stopHeartbeat();
   if (currentSock) {
@@ -79,10 +94,11 @@ function startHeartbeat(): void {
   stopHeartbeat();
   heartbeatTimer = setInterval(async () => {
     if (!connectionOpen || !currentSock) {
-      console.log('[heartbeat] Skipping — not connected');
+      console.log(`[wa#${socketId}] Heartbeat skipped — not connected`);
       return;
     }
 
+    const start = Date.now();
     try {
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('timed out')), 15_000)
@@ -91,9 +107,11 @@ function startHeartbeat(): void {
         currentSock.fetchBlocklist(),
         timeout,
       ]);
-      console.log('[heartbeat] Connection alive');
+      const latency = Date.now() - start;
+      console.log(`[wa#${socketId}] Heartbeat OK (${latency}ms, uptime ${formatUptime(connectedSince)})`);
     } catch (err) {
-      forceReconnect(`Server query failed (${err})`);
+      const latency = Date.now() - start;
+      forceReconnect(`Heartbeat failed after ${latency}ms: ${err}`);
     }
   }, HEARTBEAT_INTERVAL);
 }
@@ -118,6 +136,10 @@ export async function connectToWhatsApp(): Promise<void> {
     currentSock = null;
   }
 
+  const id = ++socketId;
+  reconnectCount++;
+  console.log(`[wa#${id}] Creating socket (reconnect #${reconnectCount}, backoff ${reconnectDelay}ms)`);
+
   const sock = makeWASocket({
     auth: state,
     logger,
@@ -140,13 +162,19 @@ export async function connectToWhatsApp(): Promise<void> {
     }
 
     if (connection === 'close') {
+      const uptime = formatUptime(connectedSince);
       connectionOpen = false;
+      connectedSince = null;
       stopHeartbeat();
-      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+
+      const boomErr = lastDisconnect?.error as Boom | undefined;
+      const statusCode = boomErr?.output?.statusCode;
+      const errorMsg = boomErr?.message ?? 'unknown';
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
       console.log(
-        `Connection closed (status ${statusCode}). Reconnecting in ${reconnectDelay / 1000}s...`
+        `[wa#${id}] Connection closed: status=${statusCode} error="${errorMsg}" uptime=${uptime}. ` +
+        (shouldReconnect ? `Reconnecting in ${reconnectDelay / 1000}s...` : 'Not reconnecting (logged out).')
       );
 
       if (shouldReconnect) {
@@ -160,8 +188,10 @@ export async function connectToWhatsApp(): Promise<void> {
     }
 
     if (connection === 'open') {
-      console.log('Connected to WhatsApp!');
+      connectedSince = Date.now();
+      reconnectCount = 0;
       reconnectDelay = 2_000; // Reset backoff on successful connection
+      console.log(`[wa#${id}] Connected to WhatsApp`);
       startHeartbeat();
       notifyConnectionOpen();
       for (const cb of connectionReadyCallbacks) {
