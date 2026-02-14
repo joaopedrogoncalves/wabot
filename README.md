@@ -1,4 +1,4 @@
-# OpenClaw
+# WABot
 
 A WhatsApp bot with two features:
 
