@@ -19,7 +19,7 @@ async function main() {
   const configHolder: ConfigHolder = { current: config };
 
   const eventGroups = config.groups.filter((g) => g.events);
-  const chatbotGroups = config.groups.filter((g) => g.chatbot?.enabled !== false);
+  const chatbotGroups = config.groups.filter((g) => g.chatbot && g.chatbot.enabled !== false);
 
   console.log(`Loaded ${config.groups.length} group(s): ${eventGroups.length} with events, ${chatbotGroups.length} with chatbot`);
 
