@@ -33,7 +33,7 @@ function renderLayout(title: string, bodyHtml: string): string {
   input[type="text"], input[type="number"], textarea, select {
     width: 100%; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; font-size: .9rem;
   }
-  textarea { min-height: 120px; font-family: monospace; resize: vertical; }
+  textarea { min-height: 320px; font-family: monospace; resize: vertical; }
   button, .btn {
     display: inline-block; padding: .5rem 1.25rem; border: none; border-radius: 4px;
     font-size: .9rem; cursor: pointer; text-decoration: none; color: #fff;
@@ -69,8 +69,9 @@ export function renderAdminDashboard(config: AppConfig, adminToken: string): str
   const rows = config.groups.map((g) => {
     const name = esc(g.name ?? g.jid);
     const hasEvents = g.events ? '<span class="badge badge-green">events</span>' : '';
-    const hasChatbot = g.chatbot ? '<span class="badge badge-green">chatbot</span>' : '';
-    const noneLabel = !g.events && !g.chatbot ? '<span class="badge badge-gray">none</span>' : '';
+    const chatbotActive = g.chatbot && g.chatbot.enabled !== false;
+    const hasChatbot = chatbotActive ? '<span class="badge badge-green">chatbot</span>' : '';
+    const noneLabel = !g.events && !chatbotActive ? '<span class="badge badge-gray">none</span>' : '';
     const groupUrl = g.webToken ? `/group/${esc(g.webToken)}` : '';
     const groupLink = groupUrl
       ? `<div class="group-link">Per-group link: <a href="${groupUrl}">${groupUrl}</a></div>`
@@ -151,7 +152,7 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
       <form method="POST" action="/admin/group/${encodeURIComponent(group.jid)}?token=${esc(adminToken)}">
 
         <div class="checkbox-row">
-          <input type="checkbox" id="chatbotEnabled" name="chatbotEnabled" value="1" ${chatbot ? 'checked' : ''}>
+          <input type="checkbox" id="chatbotEnabled" name="chatbotEnabled" value="1" ${chatbot && chatbot.enabled !== false ? 'checked' : ''}>
           <label for="chatbotEnabled">Enable Chatbot</label>
         </div>
 

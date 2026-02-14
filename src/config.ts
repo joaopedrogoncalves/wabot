@@ -19,6 +19,7 @@ export interface EventsConfig {
 }
 
 export interface ChatbotGroupConfig {
+  enabled?: boolean;
   botName: string;
   systemPrompt: string;
   enableThinking?: boolean;
@@ -101,16 +102,20 @@ export function loadAppConfig(): AppConfig {
     }
 
     if (g.chatbot) {
-      if (!g.chatbot.botName) {
-        throw new Error(`Group "${g.name ?? g.jid}" has chatbot config but missing "botName"`);
-      }
-      if (!anthropicApiKey) {
-        throw new Error(
-          `Group "${g.name ?? g.jid}" has chatbot config but ANTHROPIC_API_KEY is not set`,
-        );
+      const chatbotEnabled = g.chatbot.enabled !== false;
+      if (chatbotEnabled) {
+        if (!g.chatbot.botName) {
+          throw new Error(`Group "${g.name ?? g.jid}" has chatbot config but missing "botName"`);
+        }
+        if (!anthropicApiKey) {
+          throw new Error(
+            `Group "${g.name ?? g.jid}" has chatbot config but ANTHROPIC_API_KEY is not set`,
+          );
+        }
       }
       group.chatbot = {
-        botName: g.chatbot.botName,
+        enabled: chatbotEnabled,
+        botName: g.chatbot.botName ?? '',
         systemPrompt:
           g.chatbot.systemPrompt ??
           'You are a helpful assistant in a WhatsApp group chat. Be concise and friendly.',

@@ -72,19 +72,16 @@ export function startWebServer(
         if (!group) throw new Error('Group not found in config file.');
 
         // Chatbot settings
-        if (req.body.chatbotEnabled) {
-          if (!group.chatbot) group.chatbot = {};
-          group.chatbot.botName = req.body.botName || group.chatbot.botName || 'bot';
-          group.chatbot.systemPrompt = req.body.systemPrompt || group.chatbot.systemPrompt;
-          group.chatbot.enableThinking = req.body.enableThinking === '1';
-          const thinkingBudget = parseInt(req.body.thinkingBudget, 10);
-          if (!isNaN(thinkingBudget) && thinkingBudget > 0) group.chatbot.thinkingBudget = thinkingBudget;
-          group.chatbot.enableWebSearch = req.body.enableWebSearch === '1';
-          const maxSearches = parseInt(req.body.maxSearches, 10);
-          if (!isNaN(maxSearches) && maxSearches > 0) group.chatbot.maxSearches = maxSearches;
-        } else {
-          delete group.chatbot;
-        }
+        if (!group.chatbot) group.chatbot = {};
+        group.chatbot.enabled = !!req.body.chatbotEnabled;
+        group.chatbot.botName = req.body.botName || group.chatbot.botName || 'bot';
+        group.chatbot.systemPrompt = req.body.systemPrompt || group.chatbot.systemPrompt;
+        group.chatbot.enableThinking = req.body.enableThinking === '1';
+        const thinkingBudget = parseInt(req.body.thinkingBudget, 10);
+        if (!isNaN(thinkingBudget) && thinkingBudget > 0) group.chatbot.thinkingBudget = thinkingBudget;
+        group.chatbot.enableWebSearch = req.body.enableWebSearch === '1';
+        const maxSearches = parseInt(req.body.maxSearches, 10);
+        if (!isNaN(maxSearches) && maxSearches > 0) group.chatbot.maxSearches = maxSearches;
 
         // Events settings
         if (req.body.birthdayEnabled) {

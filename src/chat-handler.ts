@@ -46,7 +46,7 @@ function extractMentionedJids(msg: { message?: Record<string, any> | null }): st
 export function setupChatHandler(configHolder: ConfigHolder): void {
   onConnectionReady((sock: WASocket) => {
     const jids = configHolder.current.groups
-      .filter((g) => g.chatbot)
+      .filter((g) => g.chatbot?.enabled !== false)
       .map((g) => g.jid);
     console.log(`Chat handler registered for groups: ${jids.join(', ')}`);
 
@@ -64,7 +64,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         console.log(`[chat] MSG from=${rawSender} jid=${remoteJid} participant=${msg.key.participant ?? 'N/A'} text=${rawText ? `"${rawText.slice(0, 80)}"` : '(no text)'}`);
 
         const config = configHolder.current;
-        const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot);
+        const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot?.enabled !== false);
         if (!groupConfig) continue;
 
         const image = await extractImage(msg);
