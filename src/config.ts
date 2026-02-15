@@ -80,7 +80,7 @@ export function loadAppConfig(): AppConfig {
       webToken: g.webToken,
     };
 
-    const eventsRaw = g.events ?? g.birthday;
+    const eventsRaw = g.events;
     if (eventsRaw) {
       if (!eventsRaw.spreadsheetId) {
         throw new Error(`Group "${g.name ?? g.jid}" has events config but missing "spreadsheetId"`);

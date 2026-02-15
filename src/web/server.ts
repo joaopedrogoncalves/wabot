@@ -84,16 +84,14 @@ export function startWebServer(
         if (!isNaN(maxSearches) && maxSearches > 0) group.chatbot.maxSearches = maxSearches;
 
         // Events settings
-        if (req.body.birthdayEnabled) {
+        if (req.body.eventsEnabled) {
           if (!group.events) group.events = {};
           group.events.spreadsheetId = req.body.spreadsheetId || group.events.spreadsheetId;
           group.events.sheetName = req.body.sheetName || 'Sheet1';
           group.events.messageTemplate = req.body.messageTemplate || group.events.messageTemplate;
           group.events.cronSchedule = req.body.cronSchedule || group.events.cronSchedule || '0 8 * * *';
-          delete group.birthday;
         } else {
           delete group.events;
-          delete group.birthday;
         }
       });
       res.send(renderSuccess('Group settings saved.', `/admin?token=${adminToken}`));

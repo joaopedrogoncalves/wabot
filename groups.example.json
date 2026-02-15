@@ -8,7 +8,7 @@
       "jid": "120360000000000000@g.us",
       "name": "Family Group",
       "webToken": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "birthday": {
+      "events": {
         "spreadsheetId": "1aBcDeFgHiJkLmNoPqRsTuVwXyZ",
         "sheetName": "Sheet1",
         "messageTemplate": "🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!",

@@ -181,8 +181,8 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
         <h2 style="margin-top:1.5rem">Events Settings</h2>
 
         <div class="checkbox-row">
-          <input type="checkbox" id="birthdayEnabled" name="birthdayEnabled" value="1" ${events ? 'checked' : ''}>
-          <label for="birthdayEnabled">Enable Events</label>
+          <input type="checkbox" id="eventsEnabled" name="eventsEnabled" value="1" ${events ? 'checked' : ''}>
+          <label for="eventsEnabled">Enable Events</label>
         </div>
 
         <label>Spreadsheet ID</label>
