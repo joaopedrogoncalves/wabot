@@ -7,6 +7,7 @@ export interface ChatMessage {
   fromBot: boolean;
   imageData?: string;
   imageMimeType?: string;
+  timestamp?: number;
 }
 
 const MAX_HISTORY = 50;
@@ -23,6 +24,7 @@ function getOrCreateGroup(groupJid: string): ChatMessage[] {
 
 export function addMessage(groupJid: string, msg: ChatMessage): void {
   const messages = getOrCreateGroup(groupJid);
+  if (msg.timestamp == null) msg.timestamp = Date.now();
   messages.push(msg);
   if (messages.length > MAX_HISTORY) {
     messages.splice(0, messages.length - MAX_HISTORY);
@@ -107,4 +109,9 @@ export function toAnthropicMessages(groupJid: string): MessageParam[] {
   }
 
   return result;
+}
+
+export function getMessageCountSince(groupJid: string, since: number): number {
+  const messages = historyByGroup.get(groupJid) ?? [];
+  return messages.filter((m) => (m.timestamp ?? 0) > since).length;
 }

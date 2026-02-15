@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { AppConfig, GroupConfig } from './config.js';
 import { toAnthropicMessages } from './chat-history.js';
+import { getProfilesPrompt } from './group-profiles.js';
 
 let client: Anthropic | null = null;
 
@@ -20,11 +21,13 @@ export async function generateResponse(config: AppConfig, groupConfig: GroupConf
   }
 
   const chatbot = groupConfig.chatbot!;
+  const profileContext = getProfilesPrompt(groupJid);
+  const systemPrompt = chatbot.systemPrompt + profileContext;
 
   const params: Record<string, any> = {
     model: config.global.claudeModel,
     max_tokens: config.global.claudeMaxTokens,
-    system: chatbot.systemPrompt,
+    system: systemPrompt,
     messages,
   };
 

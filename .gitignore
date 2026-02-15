@@ -3,3 +3,4 @@ auth_info_baileys*/
 .env
 dist/
 groups.json
+group_profiles/

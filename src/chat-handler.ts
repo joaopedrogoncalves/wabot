@@ -2,6 +2,7 @@ import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeyso
 import type { ConfigHolder } from './config.js';
 import { addMessage, getNameToJidMap } from './chat-history.js';
 import { generateResponse } from './llm.js';
+import { maybeRefreshProfiles } from './group-profiles.js';
 import { getSocket, onConnectionReady, waitForConnection } from './whatsapp.js';
 
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
@@ -41,6 +42,15 @@ function extractMentionedJids(msg: { message?: Record<string, any> | null }): st
     m.imageMessage?.contextInfo ??
     m.videoMessage?.contextInfo;
   return ctx?.mentionedJid ?? [];
+}
+
+const groupLocks = new Map<string, Promise<void>>();
+
+function withGroupLock<T>(groupJid: string, fn: () => Promise<T>): Promise<T> {
+  const prev = groupLocks.get(groupJid) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  groupLocks.set(groupJid, next.then(() => {}, () => {}));
+  return next;
 }
 
 export function setupChatHandler(configHolder: ConfigHolder): void {
@@ -117,57 +127,62 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         console.log(`Chat triggered by ${senderName}: ${text}`);
 
-        try {
-          await sock.sendPresenceUpdate('composing', remoteJid);
+        withGroupLock(remoteJid, async () => {
+          try {
+            await sock.sendPresenceUpdate('composing', remoteJid);
 
-          const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
+            const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
 
-          // Resolve @Name or @number mentions in the response to JIDs
-          const nameToJid = getNameToJidMap(remoteJid);
-          // Also build a number→jid map (e.g. "80033108471912" → "80033108471912:1@lid")
-          const numberToJid = new Map<string, string>();
-          for (const jid of nameToJid.values()) {
-            const num = jid.replace(/[:@].+$/, '');
-            numberToJid.set(num, jid);
-          }
-
-          const mentions: string[] = [];
-          const mentionRegex = /@([\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ]*[\p{L}\p{M}\p{N}]|[\p{L}\p{M}\p{N}]+)/gu;
-          let responseText = response;
-          // Process matches in reverse order so replacements don't shift indices
-          const matches = [...response.matchAll(mentionRegex)].reverse();
-          for (const match of matches) {
-            const captured = match[1];
-            // Try name lookup first, then number lookup
-            const jid = nameToJid.get(captured.toLowerCase()) ?? numberToJid.get(captured);
-            if (jid && !mentions.includes(jid)) {
-              mentions.push(jid);
-            }
-            if (jid) {
-              // Replace @Name with @number for WhatsApp to render the mention
+            // Resolve @Name or @number mentions in the response to JIDs
+            const nameToJid = getNameToJidMap(remoteJid);
+            // Also build a number→jid map (e.g. "80033108471912" → "80033108471912:1@lid")
+            const numberToJid = new Map<string, string>();
+            for (const jid of nameToJid.values()) {
               const num = jid.replace(/[:@].+$/, '');
-              responseText = responseText.slice(0, match.index!) + '@' + num + responseText.slice(match.index! + match[0].length);
+              numberToJid.set(num, jid);
             }
-          }
-          if (mentions.length > 0) {
-            console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
-          }
 
-          // Use the current socket (may have reconnected during LLM call)
-          await waitForConnection();
-          const currentSock = getSocket();
-          await currentSock.sendPresenceUpdate('paused', remoteJid);
-          await currentSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
+            const mentions: string[] = [];
+            const mentionRegex = /@([\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ]*[\p{L}\p{M}\p{N}]|[\p{L}\p{M}\p{N}]+)/gu;
+            let responseText = response;
+            // Process matches in reverse order so replacements don't shift indices
+            const matches = [...response.matchAll(mentionRegex)].reverse();
+            for (const match of matches) {
+              const captured = match[1];
+              // Try name lookup first, then number lookup
+              const jid = nameToJid.get(captured.toLowerCase()) ?? numberToJid.get(captured);
+              if (jid && !mentions.includes(jid)) {
+                mentions.push(jid);
+              }
+              if (jid) {
+                // Replace @Name with @number for WhatsApp to render the mention
+                const num = jid.replace(/[:@].+$/, '');
+                responseText = responseText.slice(0, match.index!) + '@' + num + responseText.slice(match.index! + match[0].length);
+              }
+            }
+            if (mentions.length > 0) {
+              console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
+            }
 
-          addMessage(remoteJid, {
-            senderName: groupConfig.chatbot!.botName,
-            senderJid: currentSock.user?.id ?? botJid ?? '',
-            text: response,
-            fromBot: true,
-          });
-        } catch (err) {
-          console.error('Failed to generate/send chat response:', err);
-        }
+            // Use the current socket (may have reconnected during LLM call)
+            await waitForConnection();
+            const currentSock = getSocket();
+            await currentSock.sendPresenceUpdate('paused', remoteJid);
+            await currentSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
+
+            addMessage(remoteJid, {
+              senderName: groupConfig.chatbot!.botName,
+              senderJid: currentSock.user?.id ?? botJid ?? '',
+              text: response,
+              fromBot: true,
+            });
+
+            maybeRefreshProfiles(configHolder.current, remoteJid);
+          } catch (err) {
+            console.error('Failed to generate/send chat response:', err);
+          }
+        });
+
       }
     });
   });
