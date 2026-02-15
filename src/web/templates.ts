@@ -15,7 +15,7 @@ function renderLayout(title: string, bodyHtml: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(title)} - OpenClaw</title>
+<title>${esc(title)} - WABot</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; }
   body {
@@ -84,7 +84,7 @@ export function renderAdminDashboard(config: AppConfig, adminToken: string): str
   }).join('\n');
 
   const body = `
-    <h1>OpenClaw Admin</h1>
+    <h1>WABot Admin</h1>
     <div class="nav">
       <a href="/admin/global?token=${esc(adminToken)}">Global Settings</a>
     </div>

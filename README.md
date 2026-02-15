@@ -48,7 +48,7 @@ All configuration is done via environment variables (see `.env.example`).
 | `CHAT_GROUP_JID` | — | WhatsApp group JID(s) for the chatbot (comma-separated for multiple) |
 | `ANTHROPIC_API_KEY` | — | Claude API key |
 | `SYSTEM_PROMPT` | `You are a helpful assistant...` | Bot persona / system prompt |
-| `BOT_NAME` | `openclaw` | Keyword prefix that triggers the bot |
+| `BOT_NAME` | — | Keyword prefix that triggers the bot |
 | `CLAUDE_MODEL` | `claude-sonnet-4-5-20250929` | Anthropic model ID |
 | `CLAUDE_MAX_TOKENS` | `1024` | Max response tokens |
 
