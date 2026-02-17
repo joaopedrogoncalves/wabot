@@ -54,6 +54,21 @@ export function waitForConnection(): Promise<void> {
   });
 }
 
+export function waitForConnectionWithTimeout(ms: number): Promise<void> {
+  if (connectionOpen && currentSock) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out waiting for WhatsApp connection (${ms}ms)`));
+    }, ms);
+    connectionOpenResolvers.push(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 export function getSocket(): WASocket {
   if (!currentSock) {
     throw new Error('WhatsApp socket not initialized');

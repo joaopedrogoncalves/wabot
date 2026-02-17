@@ -55,7 +55,13 @@ export async function generateResponse(config: AppConfig, groupConfig: GroupConf
     console.log(`[llm]   tools=${JSON.stringify(params.tools)}`);
   }
 
-  const response = await anthropic.messages.create(params as any);
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('LLM request timed out after 2 minutes')), 120_000)
+  );
+  const response = await Promise.race([
+    anthropic.messages.create(params as any),
+    timeout,
+  ]);
 
   console.log(`[llm] Response for "${groupLabel}": stop_reason=${response.stop_reason}, blocks=${response.content.length}`);
   for (const block of response.content) {

@@ -3,7 +3,7 @@ import type { ConfigHolder } from './config.js';
 import { addMessage, findMessageById, getNameToJidMap } from './chat-history.js';
 import { generateResponse } from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
-import { getSocket, onConnectionReady, waitForConnection } from './whatsapp.js';
+import { getSocket, onConnectionReady, waitForConnectionWithTimeout } from './whatsapp.js';
 
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
   const m = msg.message;
@@ -155,7 +155,9 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         withGroupLock(remoteJid, async () => {
           try {
-            await sock.sendPresenceUpdate('composing', remoteJid);
+            // Get fresh socket (may have reconnected since trigger)
+            const currentSock = getSocket();
+            await currentSock.sendPresenceUpdate('composing', remoteJid);
 
             const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
 
@@ -190,15 +192,15 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
               console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
             }
 
-            // Use the current socket (may have reconnected during LLM call)
-            await waitForConnection();
-            const currentSock = getSocket();
-            await currentSock.sendPresenceUpdate('paused', remoteJid);
-            const sent = await currentSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
+            // Re-fetch socket in case of reconnect during LLM call
+            await waitForConnectionWithTimeout(30_000);
+            const sendSock = getSocket();
+            await sendSock.sendPresenceUpdate('paused', remoteJid);
+            const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
 
             addMessage(remoteJid, {
               senderName: groupConfig.chatbot!.botName,
-              senderJid: currentSock.user?.id ?? botJid ?? '',
+              senderJid: sendSock.user?.id ?? botJid ?? '',
               text: response,
               fromBot: true,
               messageId: sent?.key?.id ?? undefined,
