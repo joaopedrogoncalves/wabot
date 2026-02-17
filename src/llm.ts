@@ -7,7 +7,7 @@ let client: Anthropic | null = null;
 
 function getClient(apiKey: string): Anthropic {
   if (!client) {
-    client = new Anthropic({ apiKey });
+    client = new Anthropic({ apiKey, maxRetries: 3 });
   }
   return client;
 }
