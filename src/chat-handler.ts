@@ -1,6 +1,6 @@
 import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
 import type { ConfigHolder } from './config.js';
-import { addMessage, getNameToJidMap } from './chat-history.js';
+import { addMessage, findMessageById, getNameToJidMap } from './chat-history.js';
 import { generateResponse } from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
 import { getSocket, onConnectionReady, waitForConnection } from './whatsapp.js';
@@ -77,6 +77,31 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot && g.chatbot.enabled !== false);
         if (!groupConfig) continue;
 
+        // Handle emoji reactions
+        const reaction = msg.message?.reactionMessage;
+        if (reaction) {
+          const emoji = reaction.text;
+          if (!emoji) continue; // reaction removed
+          const reactorJid = msg.key.participant ?? msg.key.remoteJid ?? '';
+          const reactorName = msg.pushName ?? reactorJid;
+          const targetId = reaction.key?.id;
+          const targetMsg = targetId ? findMessageById(remoteJid, targetId) : undefined;
+          const targetLabel = targetMsg
+            ? (targetMsg.fromBot ? 'the bot\'s message' : `${targetMsg.senderName}'s message`)
+              + (targetMsg.text ? `: "${targetMsg.text.slice(0, 60)}"` : '')
+            : 'a message';
+          const botJid = sock.user?.id;
+          const fromBot = !!botJid && areJidsSameUser(reactorJid, botJid);
+          addMessage(remoteJid, {
+            senderName: reactorName,
+            senderJid: reactorJid,
+            text: `[reacted ${emoji} to ${targetLabel}]`,
+            fromBot,
+          });
+          console.log(`[chat] Reaction ${emoji} from ${reactorName} to ${targetLabel}`);
+          continue;
+        }
+
         const image = await extractImage(msg);
         const text = extractText(msg);
         console.log(`[chat] extractedText=${text ? `"${text}"` : 'null'}, hasImage=${!!image}, messageKeys=${Object.keys(msg.message ?? {}).join(', ')}`);
@@ -94,6 +119,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           senderJid,
           text: text ?? '',
           fromBot,
+          messageId: msg.key.id ?? undefined,
           ...(image && { imageData: image.data, imageMimeType: image.mimeType }),
         });
 
@@ -168,13 +194,14 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
             await waitForConnection();
             const currentSock = getSocket();
             await currentSock.sendPresenceUpdate('paused', remoteJid);
-            await currentSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
+            const sent = await currentSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
 
             addMessage(remoteJid, {
               senderName: groupConfig.chatbot!.botName,
               senderJid: currentSock.user?.id ?? botJid ?? '',
               text: response,
               fromBot: true,
+              messageId: sent?.key?.id ?? undefined,
             });
 
             maybeRefreshProfiles(configHolder.current, remoteJid);

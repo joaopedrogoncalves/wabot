@@ -8,6 +8,7 @@ export interface ChatMessage {
   imageData?: string;
   imageMimeType?: string;
   timestamp?: number;
+  messageId?: string;
 }
 
 const MAX_HISTORY = 50;
@@ -109,6 +110,11 @@ export function toAnthropicMessages(groupJid: string): MessageParam[] {
   }
 
   return result;
+}
+
+export function findMessageById(groupJid: string, messageId: string): ChatMessage | undefined {
+  const messages = historyByGroup.get(groupJid) ?? [];
+  return messages.find((m) => m.messageId === messageId);
 }
 
 export function getMessageCountSince(groupJid: string, since: number): number {
