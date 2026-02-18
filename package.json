@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "NODE_OPTIONS='--experimental-global-webcrypto' tsx src/index.ts",
+    "start:loop": "while true; do NODE_OPTIONS='--experimental-global-webcrypto' tsx src/index.ts; echo \"Process exited ($?), restarting in 5s...\"; sleep 5; done",
     "dev": "NODE_OPTIONS='--experimental-global-webcrypto' tsx watch src/index.ts"
   },
   "keywords": [],

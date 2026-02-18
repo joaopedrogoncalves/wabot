@@ -3,7 +3,7 @@ import type { ConfigHolder } from './config.js';
 import { addMessage, findMessageById, getNameToJidMap } from './chat-history.js';
 import { generateResponse } from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
-import { getSocket, onConnectionReady, waitForConnectionWithTimeout } from './whatsapp.js';
+import { getSocket, onConnectionReady, reportTraffic, waitForConnectionWithTimeout } from './whatsapp.js';
 
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
   const m = msg.message;
@@ -62,6 +62,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       console.log(`[chat] messages.upsert: type=${type}, count=${messages.length}`);
+      reportTraffic();
 
       if (type !== 'notify') return;
 

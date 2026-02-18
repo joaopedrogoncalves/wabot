@@ -80,6 +80,14 @@ let cachedAuth: { state: Awaited<ReturnType<typeof useMultiFileAuthState>>['stat
 let reconnectDelay = 2_000;
 const MAX_RECONNECT_DELAY = 60_000;
 
+// Traffic watchdog: restart if no messages for 2 hours
+const TRAFFIC_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
+let lastTrafficAt = Date.now();
+
+export function reportTraffic(): void {
+  lastTrafficAt = Date.now();
+}
+
 // Heartbeat: periodically verify the connection can do a server round-trip
 const HEARTBEAT_INTERVAL = 12 * 60 * 1000; // 12 minutes
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -123,7 +131,13 @@ function startHeartbeat(): void {
         timeout,
       ]);
       const latency = Date.now() - start;
-      console.log(`[wa#${socketId}] Heartbeat OK (${latency}ms, uptime ${formatUptime(connectedSince)})`);
+      const silentFor = Date.now() - lastTrafficAt;
+      const silentMin = Math.round(silentFor / 60_000);
+      console.log(`[wa#${socketId}] Heartbeat OK (${latency}ms, uptime ${formatUptime(connectedSince)}, last traffic ${silentMin}m ago)`);
+      if (silentFor > TRAFFIC_TIMEOUT) {
+        console.error(`[wa#${socketId}] No message traffic for ${silentMin}m — restarting process`);
+        process.exit(1);
+      }
     } catch (err) {
       const latency = Date.now() - start;
       forceReconnect(`Heartbeat failed after ${latency}ms: ${err}`);
