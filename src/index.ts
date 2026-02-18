@@ -3,7 +3,7 @@ import { syncGroups } from './config.js';
 import type { ConfigHolder } from './config.js';
 import { connectToWhatsApp, listGroups } from './whatsapp.js';
 import { fetchEventRows } from './sheets.js';
-import { startEventCrons, checkAllEvents } from './cron.js';
+import { startEventCrons } from './cron.js';
 import { setupChatHandler } from './chat-handler.js';
 import { startWebServer } from './web/server.js';
 
@@ -46,7 +46,6 @@ async function main() {
   }
 
   if (eventGroups.length > 0) {
-    await checkAllEvents(configHolder);
     startEventCrons(configHolder);
   } else {
     console.log('No groups with events configured.');
