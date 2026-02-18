@@ -38,10 +38,9 @@ function notifyConnectionOpen(): void {
 }
 
 export function onConnectionReady(cb: (sock: WASocket) => void): void {
+  connectionReadyCallbacks.push(cb);
   if (connectionOpen && currentSock) {
     cb(currentSock);
-  } else {
-    connectionReadyCallbacks.push(cb);
   }
 }
 
