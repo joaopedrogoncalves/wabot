@@ -1,5 +1,6 @@
 const originalLog = console.log;
 const originalError = console.error;
+const originalWarn = console.warn;
 
 function timestamp(): string {
   const d = new Date();
@@ -13,4 +14,8 @@ console.log = (...args: any[]) => {
 
 console.error = (...args: any[]) => {
   originalError(`[${timestamp()}]`, ...args);
+};
+
+console.warn = (...args: any[]) => {
+  originalWarn(`[${timestamp()}]`, ...args);
 };

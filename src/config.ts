@@ -6,6 +6,7 @@ export interface GlobalConfig {
   anthropicApiKey: string;
   googleServiceAccountEmail: string;
   googlePrivateKey: string;
+  twitterBearerToken?: string;
   claudeModel: string;
   claudeMaxTokens: number;
 }
@@ -60,11 +61,13 @@ export function loadAppConfig(): AppConfig {
   const anthropicApiKey = process.env['ANTHROPIC_API_KEY'] ?? '';
   const googleServiceAccountEmail = process.env['GOOGLE_SERVICE_ACCOUNT_EMAIL'] ?? '';
   const googlePrivateKey = (process.env['GOOGLE_PRIVATE_KEY'] ?? '').replace(/\\n/g, '\n');
+  const twitterBearerToken = process.env['TWITTER_BEARER_TOKEN'] ?? '';
 
   const global: GlobalConfig = {
     anthropicApiKey,
     googleServiceAccountEmail,
     googlePrivateKey,
+    twitterBearerToken: twitterBearerToken || undefined,
     claudeModel: globalJson.claudeModel ?? 'claude-sonnet-4-5-20250929',
     claudeMaxTokens: globalJson.claudeMaxTokens ?? 1024,
   };

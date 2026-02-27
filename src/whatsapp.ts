@@ -106,6 +106,7 @@ function forceReconnect(reason: string): void {
     currentSock.ev.removeAllListeners('connection.update');
     currentSock.ev.removeAllListeners('creds.update');
     currentSock.ev.removeAllListeners('messages.upsert');
+    currentSock.ev.removeAllListeners('messages.update');
     try { currentSock.end(undefined); } catch {}
     currentSock = null;
   }
@@ -160,6 +161,7 @@ export async function connectToWhatsApp(): Promise<void> {
     currentSock.ev.removeAllListeners('connection.update');
     currentSock.ev.removeAllListeners('creds.update');
     currentSock.ev.removeAllListeners('messages.upsert');
+    currentSock.ev.removeAllListeners('messages.update');
     currentSock.end(undefined);
     currentSock = null;
   }

@@ -117,6 +117,13 @@ export function findMessageById(groupJid: string, messageId: string): ChatMessag
   return messages.find((m) => m.messageId === messageId);
 }
 
+export function updateMessageText(groupJid: string, messageId: string, newText: string): void {
+  const messages = historyByGroup.get(groupJid);
+  if (!messages) return;
+  const msg = messages.find((m) => m.messageId === messageId);
+  if (msg) msg.text = newText;
+}
+
 export function getMessageCountSince(groupJid: string, since: number): number {
   const messages = historyByGroup.get(groupJid) ?? [];
   return messages.filter((m) => (m.timestamp ?? 0) > since).length;

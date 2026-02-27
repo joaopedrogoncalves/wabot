@@ -5,6 +5,7 @@ import { connectToWhatsApp, listGroups } from './whatsapp.js';
 import { fetchEventRows } from './sheets.js';
 import { startEventCrons } from './cron.js';
 import { setupChatHandler } from './chat-handler.js';
+import { logTwitterConfigStatus } from './twitter.js';
 import { startWebServer } from './web/server.js';
 
 async function main() {
@@ -22,6 +23,7 @@ async function main() {
   const chatbotGroups = config.groups.filter((g) => g.chatbot && g.chatbot.enabled !== false);
 
   console.log(`Loaded ${config.groups.length} group(s): ${eventGroups.length} with events, ${chatbotGroups.length} with chatbot`);
+  logTwitterConfigStatus(config.global);
 
   if (chatbotGroups.length > 0) {
     const names = chatbotGroups.map((g) => `${g.name ?? g.jid} (${g.chatbot!.botName})`);

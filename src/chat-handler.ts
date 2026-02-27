@@ -1,8 +1,9 @@
 import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
 import type { ConfigHolder } from './config.js';
-import { addMessage, findMessageById, getNameToJidMap } from './chat-history.js';
+import { addMessage, findMessageById, getNameToJidMap, updateMessageText } from './chat-history.js';
 import { generateResponse } from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
+import { enrichTextWithTweets } from './twitter.js';
 import { getSocket, onConnectionReady, reportTraffic, waitForConnectionWithTimeout } from './whatsapp.js';
 
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
@@ -42,6 +43,17 @@ function extractMentionedJids(msg: { message?: Record<string, any> | null }): st
     m.imageMessage?.contextInfo ??
     m.videoMessage?.contextInfo;
   return ctx?.mentionedJid ?? [];
+}
+
+const MAX_TRIGGERED_IDS = 200;
+const triggeredMessageIds = new Set<string>();
+
+function trackTriggered(id: string): void {
+  triggeredMessageIds.add(id);
+  if (triggeredMessageIds.size > MAX_TRIGGERED_IDS) {
+    const first = triggeredMessageIds.values().next().value!;
+    triggeredMessageIds.delete(first);
+  }
 }
 
 const groupLocks = new Map<string, Promise<void>>();
@@ -107,6 +119,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const text = extractText(msg);
         console.log(`[chat] extractedText=${text ? `"${text}"` : 'null'}, hasImage=${!!image}, messageKeys=${Object.keys(msg.message ?? {}).join(', ')}`);
         if (!text && !image) continue;
+        const enrichedText = text ? await enrichTextWithTweets(text, config.global) : null;
 
         const senderJid = msg.key.participant ?? msg.key.remoteJid ?? '';
         const senderName = msg.pushName ?? senderJid;
@@ -118,7 +131,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         addMessage(remoteJid, {
           senderName,
           senderJid,
-          text: text ?? '',
+          text: enrichedText ?? '',
           fromBot,
           messageId: msg.key.id ?? undefined,
           ...(image && { imageData: image.data, imageMimeType: image.mimeType }),
@@ -152,6 +165,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (!mentionTriggered && !prefixTriggered && !replyTriggered) continue;
 
+        if (msg.key.id) trackTriggered(msg.key.id);
         console.log(`Chat triggered by ${senderName}: ${text}`);
 
         withGroupLock(remoteJid, async () => {
@@ -213,6 +227,103 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           }
         });
 
+      }
+    });
+
+    sock.ev.on('messages.update', async (updates) => {
+      for (const update of updates) {
+        const remoteJid = update.key.remoteJid;
+        if (!remoteJid) continue;
+
+        const config = configHolder.current;
+        const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot && g.chatbot.enabled !== false);
+        if (!groupConfig) continue;
+
+        const editedMessage = (update.update as any)?.message?.editedMessage?.message;
+        if (!editedMessage) continue;
+
+        const text = extractText({ message: editedMessage });
+        if (!text) continue;
+        const enrichedText = await enrichTextWithTweets(text, config.global);
+
+        const messageId = update.key.id;
+        if (messageId && triggeredMessageIds.has(messageId)) {
+          console.log(`[chat] Edit ignored — message ${messageId} already triggered`);
+          continue;
+        }
+
+        // Update chat history with edited text
+        if (messageId) updateMessageText(remoteJid, messageId, enrichedText);
+
+        // Check triggers: prefix or @mention (no reply check for edits)
+        const mentionedJids = extractMentionedJids({ message: editedMessage });
+        const botJid = sock.user?.id;
+        const botLid = sock.user?.lid;
+        const mentionTriggered = mentionedJids.some((jid) =>
+          (botJid && areJidsSameUser(jid, botJid)) ||
+          (botLid && areJidsSameUser(jid, botLid))
+        );
+        const prefixTriggered = text
+          .toLowerCase()
+          .startsWith(groupConfig.chatbot!.botName.toLowerCase());
+
+        if (!mentionTriggered && !prefixTriggered) continue;
+
+        if (messageId) trackTriggered(messageId);
+        const senderJid = update.key.participant ?? update.key.remoteJid ?? '';
+        console.log(`[chat] Edit triggered by ${senderJid}: ${text}`);
+
+        withGroupLock(remoteJid, async () => {
+          try {
+            const currentSock = getSocket();
+            await currentSock.sendPresenceUpdate('composing', remoteJid);
+
+            const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
+
+            const nameToJid = getNameToJidMap(remoteJid);
+            const numberToJid = new Map<string, string>();
+            for (const jid of nameToJid.values()) {
+              const num = jid.replace(/[:@].+$/, '');
+              numberToJid.set(num, jid);
+            }
+
+            const mentions: string[] = [];
+            const mentionRegex = /@([\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ]*[\p{L}\p{M}\p{N}]|[\p{L}\p{M}\p{N}]+)/gu;
+            let responseText = response;
+            const matches = [...response.matchAll(mentionRegex)].reverse();
+            for (const match of matches) {
+              const captured = match[1];
+              const jid = nameToJid.get(captured.toLowerCase()) ?? numberToJid.get(captured);
+              if (jid && !mentions.includes(jid)) {
+                mentions.push(jid);
+              }
+              if (jid) {
+                const num = jid.replace(/[:@].+$/, '');
+                responseText = responseText.slice(0, match.index!) + '@' + num + responseText.slice(match.index! + match[0].length);
+              }
+            }
+            if (mentions.length > 0) {
+              console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
+            }
+
+            await waitForConnectionWithTimeout(30_000);
+            const sendSock = getSocket();
+            await sendSock.sendPresenceUpdate('paused', remoteJid);
+            const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions });
+
+            addMessage(remoteJid, {
+              senderName: groupConfig.chatbot!.botName,
+              senderJid: sendSock.user?.id ?? botJid ?? '',
+              text: response,
+              fromBot: true,
+              messageId: sent?.key?.id ?? undefined,
+            });
+
+            maybeRefreshProfiles(configHolder.current, remoteJid);
+          } catch (err) {
+            console.error('Failed to generate/send chat response (edit):', err);
+          }
+        });
       }
     });
   });

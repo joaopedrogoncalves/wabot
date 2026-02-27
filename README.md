@@ -57,6 +57,7 @@ Configuration is split between environment variables (`.env`) for secrets and a 
 | Variable | Required | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | For chatbot | Claude API key |
+| `TWITTER_BEARER_TOKEN` | No | X/Twitter API bearer token to fetch tweet text/context from `twitter.com` / `x.com` URLs |
 | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | For events | Google service account email |
 | `GOOGLE_PRIVATE_KEY` | For events | Google service account private key |
 | `CONFIG_FILE` | No | Path to group config file (default: `./groups.json`) |
@@ -159,6 +160,8 @@ The chatbot triggers when a user either @mentions the bot, starts a message with
 | `thinkingBudget` | `2000` | Max thinking tokens (only used if thinking is enabled) |
 | `enableWebSearch` | `false` | Allow Claude to search the web |
 | `maxSearches` | `3` | Max web searches per response |
+
+If a user message contains `twitter.com`/`x.com` tweet URLs, the bot will try to fetch tweet details through the X API and append that context to the message sent to Claude. Set `TWITTER_BEARER_TOKEN` to enable this.
 
 ## Project Structure
 
