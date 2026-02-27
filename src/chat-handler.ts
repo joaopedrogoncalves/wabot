@@ -6,6 +6,39 @@ import { maybeRefreshProfiles } from './group-profiles.js';
 import { enrichTextWithTweets } from './twitter.js';
 import { getSocket, onConnectionReady, reportTraffic, waitForConnectionWithTimeout } from './whatsapp.js';
 
+const GREETING_PREFIXES = [
+  'hey',
+  'hi',
+  'hello',
+  'yo',
+  'oi',
+  'ola',
+  'olá',
+];
+
+function parseBotAliases(botName: string): string[] {
+  const aliases = botName
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return aliases.length > 0 ? aliases : [botName.trim()].filter(Boolean);
+}
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isPrefixTrigger(text: string, aliases: string[]): boolean {
+  if (aliases.length === 0) return false;
+  const aliasPattern = aliases.map((a) => escapeRegex(a)).join('|');
+  const greetingPattern = GREETING_PREFIXES.map((g) => escapeRegex(g)).join('|');
+  const re = new RegExp(
+    `^\\s*(?:(?:${greetingPattern})[\\s,!.?:;_-]+)?(?:@)?(?:${aliasPattern})(?=$|[\\s,!.?:;_-])`,
+    'iu',
+  );
+  return re.test(text);
+}
+
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
   const m = msg.message;
   if (!m) return null;
@@ -89,6 +122,8 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const config = configHolder.current;
         const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot && g.chatbot.enabled !== false);
         if (!groupConfig) continue;
+        const botAliases = parseBotAliases(groupConfig.chatbot!.botName);
+        const primaryBotName = botAliases[0] ?? groupConfig.chatbot!.botName;
 
         // Handle emoji reactions
         const reaction = msg.message?.reactionMessage;
@@ -151,9 +186,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           (botJid && areJidsSameUser(jid, botJid)) ||
           (botLid && areJidsSameUser(jid, botLid))
         );
-        const prefixTriggered = text
-          .toLowerCase()
-          .startsWith(groupConfig.chatbot!.botName.toLowerCase());
+        const prefixTriggered = isPrefixTrigger(text, botAliases);
 
         const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant
           ?? msg.message?.imageMessage?.contextInfo?.participant
@@ -214,7 +247,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
             const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
 
             addMessage(remoteJid, {
-              senderName: groupConfig.chatbot!.botName,
+              senderName: primaryBotName,
               senderJid: sendSock.user?.id ?? botJid ?? '',
               text: response,
               fromBot: true,
@@ -238,6 +271,8 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const config = configHolder.current;
         const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot && g.chatbot.enabled !== false);
         if (!groupConfig) continue;
+        const botAliases = parseBotAliases(groupConfig.chatbot!.botName);
+        const primaryBotName = botAliases[0] ?? groupConfig.chatbot!.botName;
 
         const editedMessage = (update.update as any)?.message?.editedMessage?.message;
         if (!editedMessage) continue;
@@ -263,9 +298,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           (botJid && areJidsSameUser(jid, botJid)) ||
           (botLid && areJidsSameUser(jid, botLid))
         );
-        const prefixTriggered = text
-          .toLowerCase()
-          .startsWith(groupConfig.chatbot!.botName.toLowerCase());
+        const prefixTriggered = isPrefixTrigger(text, botAliases);
 
         if (!mentionTriggered && !prefixTriggered) continue;
 
@@ -312,7 +345,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
             const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions });
 
             addMessage(remoteJid, {
-              senderName: groupConfig.chatbot!.botName,
+              senderName: primaryBotName,
               senderJid: sendSock.user?.id ?? botJid ?? '',
               text: response,
               fromBot: true,

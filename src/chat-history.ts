@@ -11,7 +11,11 @@ export interface ChatMessage {
   messageId?: string;
 }
 
-const MAX_HISTORY = 50;
+const DEFAULT_MAX_HISTORY = 400;
+const configuredMaxHistory = Number(process.env['CHAT_HISTORY_MAX'] ?? DEFAULT_MAX_HISTORY);
+const MAX_HISTORY = Number.isFinite(configuredMaxHistory) && configuredMaxHistory > 0
+  ? Math.floor(configuredMaxHistory)
+  : DEFAULT_MAX_HISTORY;
 const historyByGroup = new Map<string, ChatMessage[]>();
 
 function getOrCreateGroup(groupJid: string): ChatMessage[] {
