@@ -78,6 +78,8 @@ export function getSocket(): WASocket {
 let cachedAuth: { state: Awaited<ReturnType<typeof useMultiFileAuthState>>['state']; saveCreds: () => Promise<void> } | null = null;
 let reconnectDelay = 2_000;
 const MAX_RECONNECT_DELAY = 60_000;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let connectPromise: Promise<void> | null = null;
 
 // Traffic watchdog: restart if no messages for 2 hours
 const TRAFFIC_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
@@ -102,6 +104,10 @@ function forceReconnect(reason: string): void {
   console.error(`[wa#${socketId}] ${reason}. Forcing reconnect...`);
   connectionOpen = false;
   stopHeartbeat();
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   if (currentSock) {
     currentSock.ev.removeAllListeners('connection.update');
     currentSock.ev.removeAllListeners('creds.update');
@@ -110,7 +116,7 @@ function forceReconnect(reason: string): void {
     try { currentSock.end(undefined); } catch {}
     currentSock = null;
   }
-  connectToWhatsApp();
+  void connectToWhatsApp();
 }
 
 function startHeartbeat(): void {
@@ -154,6 +160,24 @@ async function getAuthState() {
 }
 
 export async function connectToWhatsApp(): Promise<void> {
+  if (connectPromise) {
+    return connectPromise;
+  }
+
+  connectPromise = connectToWhatsAppInternal();
+  try {
+    await connectPromise;
+  } finally {
+    connectPromise = null;
+  }
+}
+
+async function connectToWhatsAppInternal(): Promise<void> {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   const { state, saveCreds } = await getAuthState();
 
   // Clean up previous socket if it exists
@@ -192,6 +216,11 @@ export async function connectToWhatsApp(): Promise<void> {
     }
 
     if (connection === 'close') {
+      if (sock !== currentSock) {
+        console.log(`[wa#${id}] Ignoring close from stale socket`);
+        return;
+      }
+
       const uptime = formatUptime(connectedSince);
       connectionOpen = false;
       connectedSince = null;
@@ -200,24 +229,39 @@ export async function connectToWhatsApp(): Promise<void> {
       const boomErr = lastDisconnect?.error as Boom | undefined;
       const statusCode = boomErr?.output?.statusCode;
       const errorMsg = boomErr?.message ?? 'unknown';
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const wasReplaced = statusCode === DisconnectReason.connectionReplaced;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !wasReplaced;
 
       console.log(
         `[wa#${id}] Connection closed: status=${statusCode} error="${errorMsg}" uptime=${uptime}. ` +
-        (shouldReconnect ? `Reconnecting in ${reconnectDelay / 1000}s...` : 'Not reconnecting (logged out).')
+        (shouldReconnect ? `Reconnecting in ${reconnectDelay / 1000}s...` : 'Not reconnecting.')
       );
 
       if (shouldReconnect) {
-        setTimeout(() => connectToWhatsApp(), reconnectDelay);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          void connectToWhatsApp();
+        }, reconnectDelay);
         // Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s max
         reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
       } else {
-        console.log('Logged out from WhatsApp. Please delete auth_info_baileys/ and restart.');
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log('Logged out from WhatsApp. Please delete auth_info_baileys/ and restart.');
+        } else if (wasReplaced) {
+          console.error(
+            'WhatsApp session conflict (440/connectionReplaced): another instance is using the same auth session. ' +
+            'Stop the other instance and restart this bot.'
+          );
+        }
         process.exit(1);
       }
     }
 
     if (connection === 'open') {
+      if (sock !== currentSock) {
+        console.log(`[wa#${id}] Ignoring open from stale socket`);
+        return;
+      }
       connectedSince = Date.now();
       reconnectCount = 0;
       reconnectDelay = 2_000; // Reset backoff on successful connection
