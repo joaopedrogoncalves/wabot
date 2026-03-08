@@ -1,7 +1,7 @@
 import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
-import type { ConfigHolder } from './config.js';
+import type { ConfigHolder, GroupConfig } from './config.js';
 import { addMessage, findMessageById, getNameToJidMap, updateMessageText } from './chat-history.js';
-import { generateResponse } from './llm.js';
+import { generateRateLimitWarning, generateResponse } from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
 import { enrichTextWithTweets } from './twitter.js';
 import { getSocket, onConnectionReady, reportTraffic, waitForConnectionWithTimeout } from './whatsapp.js';
@@ -96,6 +96,142 @@ function withGroupLock<T>(groupJid: string, fn: () => Promise<T>): Promise<T> {
   const next = prev.then(fn, fn);
   groupLocks.set(groupJid, next.then(() => {}, () => {}));
   return next;
+}
+
+type GroupRateLimitState = {
+  timestamps: number[];
+  warned: boolean;
+  warningText?: string;
+};
+
+const groupRateLimits = new Map<string, GroupRateLimitState>();
+
+function getGroupRateLimitState(groupJid: string): GroupRateLimitState {
+  let state = groupRateLimits.get(groupJid);
+  if (!state) {
+    state = { timestamps: [], warned: false };
+    groupRateLimits.set(groupJid, state);
+  }
+  return state;
+}
+
+function getRateLimitSettings(groupConfig: GroupConfig): { limit: number; windowMs: number; warn: boolean } {
+  const chatbot = groupConfig.chatbot!;
+  return {
+    limit: chatbot.responseRateLimitCount ?? 5,
+    windowMs: (chatbot.responseRateLimitWindowSec ?? 60) * 1000,
+    warn: chatbot.responseRateLimitWarn ?? true,
+  };
+}
+
+function admitTriggeredReply(groupJid: string, groupConfig: GroupConfig): { allowed: boolean; count: number; limit: number; windowMs: number; warn: boolean } {
+  const state = getGroupRateLimitState(groupJid);
+  const { limit, windowMs, warn } = getRateLimitSettings(groupConfig);
+  const cutoff = Date.now() - windowMs;
+  state.timestamps = state.timestamps.filter((ts) => ts > cutoff);
+
+  if (state.timestamps.length < limit) {
+    state.timestamps.push(Date.now());
+    state.warned = false;
+    return { allowed: true, count: state.timestamps.length, limit, windowMs, warn };
+  }
+
+  return { allowed: false, count: state.timestamps.length, limit, windowMs, warn };
+}
+
+function claimRateLimitWarning(groupJid: string, groupConfig: GroupConfig): boolean {
+  const state = getGroupRateLimitState(groupJid);
+  const { warn } = getRateLimitSettings(groupConfig);
+  if (!warn || state.warned) return false;
+  state.warned = true;
+  return true;
+}
+
+function resolveMentions(groupJid: string, response: string): { responseText: string; mentions: string[] } {
+  const nameToJid = getNameToJidMap(groupJid);
+  const numberToJid = new Map<string, string>();
+  for (const jid of nameToJid.values()) {
+    const num = jid.replace(/[:@].+$/, '');
+    numberToJid.set(num, jid);
+  }
+
+  const mentions: string[] = [];
+  const mentionRegex = /@([\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ]*[\p{L}\p{M}\p{N}]|[\p{L}\p{M}\p{N}]+)/gu;
+  let responseText = response;
+  const matches = [...response.matchAll(mentionRegex)].reverse();
+  for (const match of matches) {
+    const captured = match[1];
+    const jid = nameToJid.get(captured.toLowerCase()) ?? numberToJid.get(captured);
+    if (jid && !mentions.includes(jid)) {
+      mentions.push(jid);
+    }
+    if (jid) {
+      const num = jid.replace(/[:@].+$/, '');
+      responseText = responseText.slice(0, match.index!) + '@' + num + responseText.slice(match.index! + match[0].length);
+    }
+  }
+  if (mentions.length > 0) {
+    console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
+  }
+
+  return { responseText, mentions };
+}
+
+async function sendGeneratedReply(
+  configHolder: ConfigHolder,
+  groupConfig: GroupConfig,
+  remoteJid: string,
+  primaryBotName: string,
+  quoted?: any,
+): Promise<void> {
+  const currentSock = getSocket();
+  await currentSock.sendPresenceUpdate('composing', remoteJid);
+
+  const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
+  const { responseText, mentions } = resolveMentions(remoteJid, response);
+
+  await waitForConnectionWithTimeout(30_000);
+  const sendSock = getSocket();
+  await sendSock.sendPresenceUpdate('paused', remoteJid);
+  const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions }, quoted ? { quoted } : undefined);
+
+  addMessage(remoteJid, {
+    senderName: primaryBotName,
+    senderJid: sendSock.user?.id ?? currentSock.user?.id ?? '',
+    text: response,
+    fromBot: true,
+    messageId: sent?.key?.id ?? undefined,
+  });
+
+  maybeRefreshProfiles(configHolder.current, remoteJid);
+}
+
+async function sendRateLimitWarning(remoteJid: string, text: string, quoted?: any): Promise<void> {
+  await waitForConnectionWithTimeout(30_000);
+  const sendSock = getSocket();
+  await sendSock.sendMessage(remoteJid, { text }, quoted ? { quoted } : undefined);
+}
+
+async function getCachedRateLimitWarning(
+  configHolder: ConfigHolder,
+  groupConfig: GroupConfig,
+  remoteJid: string,
+): Promise<string> {
+  const state = getGroupRateLimitState(remoteJid);
+  if (state.warningText) {
+    return state.warningText;
+  }
+
+  try {
+    const warningText = await generateRateLimitWarning(configHolder.current, groupConfig, remoteJid);
+    state.warningText = warningText;
+    return warningText;
+  } catch (err) {
+    console.error('Failed to generate persona rate limit warning:', err);
+    const fallback = 'Cooling down a bit. Try again in a moment.';
+    state.warningText = fallback;
+    return fallback;
+  }
 }
 
 export function setupChatHandler(configHolder: ConfigHolder): void {
@@ -198,63 +334,27 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (!mentionTriggered && !prefixTriggered && !replyTriggered) continue;
 
+        const limitDecision = admitTriggeredReply(remoteJid, groupConfig);
+        if (!limitDecision.allowed) {
+          console.log(`[chat] Rate limit denied for ${remoteJid}: ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
+          if (claimRateLimitWarning(remoteJid, groupConfig)) {
+            void (async () => {
+              const warningText = await getCachedRateLimitWarning(configHolder, groupConfig, remoteJid);
+              await sendRateLimitWarning(remoteJid, warningText, msg);
+            })().catch((err) => {
+              console.error('Failed to send rate limit warning:', err);
+            });
+          }
+          continue;
+        }
+
         if (msg.key.id) trackTriggered(msg.key.id);
         console.log(`Chat triggered by ${senderName}: ${text}`);
+        console.log(`[chat] Rate limit admitted for ${remoteJid}: ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
 
         withGroupLock(remoteJid, async () => {
           try {
-            // Get fresh socket (may have reconnected since trigger)
-            const currentSock = getSocket();
-            await currentSock.sendPresenceUpdate('composing', remoteJid);
-
-            const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
-
-            // Resolve @Name or @number mentions in the response to JIDs
-            const nameToJid = getNameToJidMap(remoteJid);
-            // Also build a number→jid map (e.g. "80033108471912" → "80033108471912:1@lid")
-            const numberToJid = new Map<string, string>();
-            for (const jid of nameToJid.values()) {
-              const num = jid.replace(/[:@].+$/, '');
-              numberToJid.set(num, jid);
-            }
-
-            const mentions: string[] = [];
-            const mentionRegex = /@([\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ]*[\p{L}\p{M}\p{N}]|[\p{L}\p{M}\p{N}]+)/gu;
-            let responseText = response;
-            // Process matches in reverse order so replacements don't shift indices
-            const matches = [...response.matchAll(mentionRegex)].reverse();
-            for (const match of matches) {
-              const captured = match[1];
-              // Try name lookup first, then number lookup
-              const jid = nameToJid.get(captured.toLowerCase()) ?? numberToJid.get(captured);
-              if (jid && !mentions.includes(jid)) {
-                mentions.push(jid);
-              }
-              if (jid) {
-                // Replace @Name with @number for WhatsApp to render the mention
-                const num = jid.replace(/[:@].+$/, '');
-                responseText = responseText.slice(0, match.index!) + '@' + num + responseText.slice(match.index! + match[0].length);
-              }
-            }
-            if (mentions.length > 0) {
-              console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
-            }
-
-            // Re-fetch socket in case of reconnect during LLM call
-            await waitForConnectionWithTimeout(30_000);
-            const sendSock = getSocket();
-            await sendSock.sendPresenceUpdate('paused', remoteJid);
-            const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions }, { quoted: msg });
-
-            addMessage(remoteJid, {
-              senderName: primaryBotName,
-              senderJid: sendSock.user?.id ?? botJid ?? '',
-              text: response,
-              fromBot: true,
-              messageId: sent?.key?.id ?? undefined,
-            });
-
-            maybeRefreshProfiles(configHolder.current, remoteJid);
+            await sendGeneratedReply(configHolder, groupConfig, remoteJid, primaryBotName, msg);
           } catch (err) {
             console.error('Failed to generate/send chat response:', err);
           }
@@ -302,57 +402,28 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (!mentionTriggered && !prefixTriggered) continue;
 
+        const limitDecision = admitTriggeredReply(remoteJid, groupConfig);
+        if (!limitDecision.allowed) {
+          console.log(`[chat] Rate limit denied for ${remoteJid} (edit): ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
+          if (claimRateLimitWarning(remoteJid, groupConfig)) {
+            void (async () => {
+              const warningText = await getCachedRateLimitWarning(configHolder, groupConfig, remoteJid);
+              await sendRateLimitWarning(remoteJid, warningText);
+            })().catch((err) => {
+              console.error('Failed to send rate limit warning (edit):', err);
+            });
+          }
+          continue;
+        }
+
         if (messageId) trackTriggered(messageId);
         const senderJid = update.key.participant ?? update.key.remoteJid ?? '';
         console.log(`[chat] Edit triggered by ${senderJid}: ${text}`);
+        console.log(`[chat] Rate limit admitted for ${remoteJid} (edit): ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
 
         withGroupLock(remoteJid, async () => {
           try {
-            const currentSock = getSocket();
-            await currentSock.sendPresenceUpdate('composing', remoteJid);
-
-            const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
-
-            const nameToJid = getNameToJidMap(remoteJid);
-            const numberToJid = new Map<string, string>();
-            for (const jid of nameToJid.values()) {
-              const num = jid.replace(/[:@].+$/, '');
-              numberToJid.set(num, jid);
-            }
-
-            const mentions: string[] = [];
-            const mentionRegex = /@([\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} ]*[\p{L}\p{M}\p{N}]|[\p{L}\p{M}\p{N}]+)/gu;
-            let responseText = response;
-            const matches = [...response.matchAll(mentionRegex)].reverse();
-            for (const match of matches) {
-              const captured = match[1];
-              const jid = nameToJid.get(captured.toLowerCase()) ?? numberToJid.get(captured);
-              if (jid && !mentions.includes(jid)) {
-                mentions.push(jid);
-              }
-              if (jid) {
-                const num = jid.replace(/[:@].+$/, '');
-                responseText = responseText.slice(0, match.index!) + '@' + num + responseText.slice(match.index! + match[0].length);
-              }
-            }
-            if (mentions.length > 0) {
-              console.log(`[chat] Resolved ${mentions.length} mention(s): ${mentions.join(', ')}`);
-            }
-
-            await waitForConnectionWithTimeout(30_000);
-            const sendSock = getSocket();
-            await sendSock.sendPresenceUpdate('paused', remoteJid);
-            const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions });
-
-            addMessage(remoteJid, {
-              senderName: primaryBotName,
-              senderJid: sendSock.user?.id ?? botJid ?? '',
-              text: response,
-              fromBot: true,
-              messageId: sent?.key?.id ?? undefined,
-            });
-
-            maybeRefreshProfiles(configHolder.current, remoteJid);
+            await sendGeneratedReply(configHolder, groupConfig, remoteJid, primaryBotName);
           } catch (err) {
             console.error('Failed to generate/send chat response (edit):', err);
           }

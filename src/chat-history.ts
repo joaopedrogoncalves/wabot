@@ -40,6 +40,13 @@ export function getHistory(groupJid: string): readonly ChatMessage[] {
   return historyByGroup.get(groupJid) ?? [];
 }
 
+export function getRecentBotMessages(groupJid: string, limit = 8): readonly ChatMessage[] {
+  if (limit <= 0) return [];
+  const messages = historyByGroup.get(groupJid) ?? [];
+  const botMessages = messages.filter((msg) => msg.fromBot);
+  return botMessages.slice(-limit);
+}
+
 export function clearHistory(groupJid: string): void {
   historyByGroup.delete(groupJid);
 }

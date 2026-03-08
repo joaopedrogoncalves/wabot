@@ -82,6 +82,13 @@ export function startWebServer(
         group.chatbot.enableWebSearch = req.body.enableWebSearch === '1';
         const maxSearches = parseInt(req.body.maxSearches, 10);
         if (!isNaN(maxSearches) && maxSearches > 0) group.chatbot.maxSearches = maxSearches;
+        const hotness = parseInt(req.body.hotness, 10);
+        if (!isNaN(hotness)) group.chatbot.hotness = Math.max(0, Math.min(100, hotness));
+        const rateLimitCount = parseInt(req.body.responseRateLimitCount, 10);
+        if (!isNaN(rateLimitCount) && rateLimitCount > 0) group.chatbot.responseRateLimitCount = rateLimitCount;
+        const rateLimitWindowSec = parseInt(req.body.responseRateLimitWindowSec, 10);
+        if (!isNaN(rateLimitWindowSec) && rateLimitWindowSec > 0) group.chatbot.responseRateLimitWindowSec = rateLimitWindowSec;
+        group.chatbot.responseRateLimitWarn = req.body.responseRateLimitWarn === '1';
 
         // Events settings
         if (req.body.eventsEnabled) {
@@ -151,6 +158,13 @@ export function startWebServer(
         g.chatbot.enableWebSearch = req.body.enableWebSearch === '1';
         const maxSearches = parseInt(req.body.maxSearches, 10);
         if (!isNaN(maxSearches) && maxSearches > 0) g.chatbot.maxSearches = maxSearches;
+        const hotness = parseInt(req.body.hotness, 10);
+        if (!isNaN(hotness)) g.chatbot.hotness = Math.max(0, Math.min(100, hotness));
+        const rateLimitCount = parseInt(req.body.responseRateLimitCount, 10);
+        if (!isNaN(rateLimitCount) && rateLimitCount > 0) g.chatbot.responseRateLimitCount = rateLimitCount;
+        const rateLimitWindowSec = parseInt(req.body.responseRateLimitWindowSec, 10);
+        if (!isNaN(rateLimitWindowSec) && rateLimitWindowSec > 0) g.chatbot.responseRateLimitWindowSec = rateLimitWindowSec;
+        g.chatbot.responseRateLimitWarn = req.body.responseRateLimitWarn === '1';
       });
 
       // Re-lookup the webToken (it shouldn't change, but use fresh config)

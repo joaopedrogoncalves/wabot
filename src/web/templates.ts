@@ -178,6 +178,20 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
         <label>Max Searches</label>
         <input type="number" name="maxSearches" value="${chatbot?.maxSearches ?? 3}" min="1">
 
+        <label>Hotness (0-100)</label>
+        <input type="number" name="hotness" value="${chatbot?.hotness ?? 35}" min="0" max="100">
+
+        <label>Max Replies Per Window</label>
+        <input type="number" name="responseRateLimitCount" value="${chatbot?.responseRateLimitCount ?? 5}" min="1">
+
+        <label>Rate Limit Window (seconds)</label>
+        <input type="number" name="responseRateLimitWindowSec" value="${chatbot?.responseRateLimitWindowSec ?? 60}" min="1">
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="responseRateLimitWarn" name="responseRateLimitWarn" value="1" ${chatbot?.responseRateLimitWarn !== false ? 'checked' : ''}>
+          <label for="responseRateLimitWarn">Send one cooldown warning</label>
+        </div>
+
         <h2 style="margin-top:1.5rem">Events Settings</h2>
 
         <div class="checkbox-row">
@@ -235,6 +249,20 @@ export function renderGroupEdit(group: GroupConfig, saved?: boolean): string {
 
         <label>Max Searches</label>
         <input type="number" name="maxSearches" value="${chatbot?.maxSearches ?? 3}" min="1">
+
+        <label>Hotness (0-100)</label>
+        <input type="number" name="hotness" value="${chatbot?.hotness ?? 35}" min="0" max="100">
+
+        <label>Max Replies Per Window</label>
+        <input type="number" name="responseRateLimitCount" value="${chatbot?.responseRateLimitCount ?? 5}" min="1">
+
+        <label>Rate Limit Window (seconds)</label>
+        <input type="number" name="responseRateLimitWindowSec" value="${chatbot?.responseRateLimitWindowSec ?? 60}" min="1">
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="responseRateLimitWarn" name="responseRateLimitWarn" value="1" ${chatbot?.responseRateLimitWarn !== false ? 'checked' : ''}>
+          <label for="responseRateLimitWarn">Send one cooldown warning</label>
+        </div>
 
         <br><br>
         <button type="submit" class="btn btn-primary">Save</button>

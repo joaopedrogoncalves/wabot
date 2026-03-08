@@ -27,6 +27,10 @@ export interface ChatbotGroupConfig {
   thinkingBudget?: number;
   enableWebSearch?: boolean;
   maxSearches?: number;
+  hotness?: number;
+  responseRateLimitCount?: number;
+  responseRateLimitWindowSec?: number;
+  responseRateLimitWarn?: boolean;
 }
 
 export interface GroupConfig {
@@ -43,6 +47,15 @@ export interface AppConfig {
 }
 
 export type ConfigHolder = { current: AppConfig };
+
+function clampInteger(value: unknown, fallback: number, min: number, max?: number): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  const int = Math.floor(num);
+  if (int < min) return fallback;
+  if (max != null && int > max) return max;
+  return int;
+}
 
 export function loadAppConfig(): AppConfig {
   const configPath = process.env['CONFIG_FILE'] || './groups.json';
@@ -126,6 +139,10 @@ export function loadAppConfig(): AppConfig {
         thinkingBudget: g.chatbot.thinkingBudget ?? 2000,
         enableWebSearch: g.chatbot.enableWebSearch ?? false,
         maxSearches: g.chatbot.maxSearches ?? 3,
+        hotness: clampInteger(g.chatbot.hotness, 35, 0, 100),
+        responseRateLimitCount: clampInteger(g.chatbot.responseRateLimitCount, 5, 1),
+        responseRateLimitWindowSec: clampInteger(g.chatbot.responseRateLimitWindowSec, 60, 1),
+        responseRateLimitWarn: g.chatbot.responseRateLimitWarn ?? true,
       };
     }
 
