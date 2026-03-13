@@ -81,7 +81,7 @@ export function loadAppConfig(): AppConfig {
     googleServiceAccountEmail,
     googlePrivateKey,
     twitterBearerToken: twitterBearerToken || undefined,
-    claudeModel: globalJson.claudeModel ?? 'claude-sonnet-4-5-20250929',
+    claudeModel: globalJson.claudeModel ?? 'claude-sonnet-4-6',
     claudeMaxTokens: globalJson.claudeMaxTokens ?? 1024,
   };
 

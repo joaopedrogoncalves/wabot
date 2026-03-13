@@ -5,6 +5,14 @@ import { getProfilesPrompt } from './group-profiles.js';
 
 let client: Anthropic | null = null;
 
+function isClaude46Model(model: string): boolean {
+  return /\bclaude-(?:sonnet|opus)-4-6\b/.test(model);
+}
+
+function getAdaptiveThinkingEffort(thinkingBudget: number | undefined): 'low' | 'medium' {
+  return (thinkingBudget ?? 2000) >= 4000 ? 'medium' : 'low';
+}
+
 function getClient(apiKey: string): Anthropic {
   if (!client) {
     client = new Anthropic({ apiKey, maxRetries: 3 });
@@ -205,9 +213,16 @@ export async function generateResponse(config: AppConfig, groupConfig: GroupConf
 
   if (chatbot.enableThinking) {
     const budget = chatbot.thinkingBudget ?? 2000;
-    params.thinking = { type: 'enabled', budget_tokens: budget };
-    // max_tokens must cover both thinking and text output
-    params.max_tokens = config.global.claudeMaxTokens + budget;
+    if (isClaude46Model(config.global.claudeModel)) {
+      params.thinking = { type: 'adaptive' };
+      params.output_config = {
+        effort: getAdaptiveThinkingEffort(chatbot.thinkingBudget),
+      };
+    } else {
+      params.thinking = { type: 'enabled', budget_tokens: budget };
+      // max_tokens must cover both thinking and text output
+      params.max_tokens = config.global.claudeMaxTokens + budget;
+    }
   }
 
   if (chatbot.enableWebSearch) {
@@ -223,7 +238,7 @@ export async function generateResponse(config: AppConfig, groupConfig: GroupConf
   console.log(`[llm]   model=${params.model}, max_tokens=${params.max_tokens}`);
   console.log(`[llm]   hotness=${chatbot.hotness ?? 35}, sampledTone=${dynamicStyle.band} (${dynamicStyle.intensity.toFixed(2)})`);
   console.log(`[llm]   system="${chatbot.systemPrompt.substring(0, 120)}${chatbot.systemPrompt.length > 120 ? '...' : ''}"`);
-  console.log(`[llm]   messages=${messages.length}, thinking=${chatbot.enableThinking ?? false}, webSearch=${chatbot.enableWebSearch ?? false}${chatbot.enableWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
+  console.log(`[llm]   messages=${messages.length}, thinking=${chatbot.enableThinking ?? false}${params.output_config ? ` (${JSON.stringify(params.output_config)})` : ''}, webSearch=${chatbot.enableWebSearch ?? false}${chatbot.enableWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
   if (params.tools) {
     console.log(`[llm]   tools=${JSON.stringify(params.tools)}`);
   }
