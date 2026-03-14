@@ -9,6 +9,11 @@ type ResponseGenerationOptions = {
   expectsImage?: boolean;
 };
 
+export type GeneratedReply = {
+  text: string;
+  reactionEmoji?: string;
+};
+
 type JsonImagePrompt = {
   prompt?: string;
 };
@@ -21,6 +26,8 @@ type JsonImageDecision = {
 type JsonReplyImagePrompt = {
   prompt?: string;
 };
+
+const REACTION_TRAILER_RE = /\n?\s*\[\[reaction:([^\]\r\n]{0,32})\]\]\s*$/u;
 
 function isClaude46Model(model: string): boolean {
   return /\bclaude-(?:sonnet|opus)-4-6\b/.test(model);
@@ -172,6 +179,32 @@ function extractTextResponse(response: { content: Array<{ type: string; text?: s
   return textParts.join('');
 }
 
+function parseReactionEmoji(rawValue: string | undefined): string | undefined {
+  const value = rawValue?.trim();
+  if (!value || /^none$/iu.test(value)) return undefined;
+  if (value.length > 16 || /\s/u.test(value)) return undefined;
+  if (Array.from(value).length > 8) return undefined;
+  if (!/^[\p{Emoji}\p{Emoji_Presentation}\p{Emoji_Modifier}\p{Emoji_Component}\u200D\uFE0F\u20E3]+$/u.test(value)) {
+    return undefined;
+  }
+  return value;
+}
+
+function extractReplyAndReaction(text: string): GeneratedReply {
+  const trimmed = text.trim();
+  const match = trimmed.match(REACTION_TRAILER_RE);
+  if (!match) {
+    return { text: trimmed };
+  }
+
+  const reactionEmoji = parseReactionEmoji(match[1]);
+  const replyText = trimmed.slice(0, match.index).trimEnd();
+  return {
+    text: replyText,
+    ...(reactionEmoji ? { reactionEmoji } : {}),
+  };
+}
+
 function buildSystemPrompt(
   groupConfig: GroupConfig,
   groupJid: string,
@@ -267,31 +300,43 @@ export async function generateResponse(
   groupConfig: GroupConfig,
   groupJid: string,
   options: ResponseGenerationOptions = {},
-): Promise<string> {
+): Promise<GeneratedReply> {
   const anthropic = getClient(config.global.anthropicApiKey);
   const messages = toAnthropicMessages(groupJid);
 
   if (messages.length === 0) {
-    return "I don't have any context yet. How can I help you?";
+    return { text: "I don't have any context yet. How can I help you?" };
   }
 
   const chatbot = groupConfig.chatbot!;
   const dynamicStyle = buildDynamicStyleInstruction(groupConfig);
+  const promptBlocks = (options.expectsImage
+    ? [
+        [
+          'The user explicitly asked for an image and you can accompany this reply with one.',
+          'Write a short caption or companion line that works naturally alongside an image.',
+          'Do not claim you cannot generate images.',
+          'Do not output markdown image syntax, image URLs, or external image links.',
+          'Never use ![alt](url) formatting.',
+          'Do not include bracketed image descriptions such as [Imagem: ...], [Image: ...], or similar prompt annotations.',
+        ].join('\n'),
+      ]
+    : []
+  ).concat([
+    [
+      'After the visible reply, append exactly one final trailer in this format: [[reaction:EMOJI]] or [[reaction:none]].',
+      'The trailer must be the last thing in the final text.',
+      'For this testing phase, bias toward using an emoji whenever the message or your reply has any noticeable snark, roast, teasing, hype, disbelief, suspense, applause, or playful energy.',
+      'Use [[reaction:none]] only for clearly plain, mild, or purely informational triggers with little emotional tone.',
+      'If your visible reply contains even mild sarcasm, mockery, or playful dismissal, prefer using an emoji instead of none.',
+      'If you choose an emoji, output exactly one emoji and no explanation.',
+      'Do not mention the trailer or explain your reaction choice.',
+    ].join('\n'),
+  ]);
   const systemPrompt = buildSystemPrompt(
     groupConfig,
     groupJid,
-    options.expectsImage
-      ? [
-          [
-            'The user explicitly asked for an image and you can accompany this reply with one.',
-            'Write a short caption or companion line that works naturally alongside an image.',
-            'Do not claim you cannot generate images.',
-            'Do not output markdown image syntax, image URLs, or external image links.',
-            'Never use ![alt](url) formatting.',
-            'Do not include bracketed image descriptions such as [Imagem: ...], [Image: ...], or similar prompt annotations.',
-          ].join('\n'),
-        ]
-      : [],
+    promptBlocks,
     { dynamicStyleInstruction: dynamicStyle.instruction },
   );
 
@@ -353,9 +398,10 @@ export async function generateResponse(
     }
   }
 
-  const replyText = extractTextResponse(response).trim();
-  if (replyText) {
-    return replyText;
+  const reply = extractReplyAndReaction(extractTextResponse(response));
+  if (reply.text) {
+    console.log(`[llm] Parsed reaction hint for "${groupLabel}": ${reply.reactionEmoji ?? 'none'}`);
+    return reply;
   }
 
   try {
@@ -373,13 +419,13 @@ export async function generateResponse(
       'Give the fallback line now.',
     );
     if (fallback) {
-      return fallback;
+      return { text: fallback };
     }
   } catch (err) {
     console.error(`[llm] Failed to generate persona fallback for "${groupLabel}":`, err);
   }
 
-  return '...';
+  return { text: '...' };
 }
 
 export async function generateRateLimitWarning(config: AppConfig, groupConfig: GroupConfig, groupJid: string): Promise<string> {

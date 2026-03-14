@@ -1,4 +1,4 @@
-import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
+import { areJidsSameUser, downloadMediaMessage, type WAMessageKey, type WASocket } from '@whiskeysockets/baileys';
 import type { ConfigHolder, GroupConfig } from './config.js';
 import { addMessage, findMessageById, getNameToJidMap, updateMessageText } from './chat-history.js';
 import { generateImage } from './gemini.js';
@@ -249,6 +249,7 @@ async function sendGeneratedReply(
   primaryBotName: string,
   latestUserText: string,
   explicitImageRequest: boolean,
+  reactionTargetKey?: WAMessageKey,
   quoted?: any,
 ): Promise<void> {
   const currentSock = getSocket();
@@ -261,11 +262,25 @@ async function sendGeneratedReply(
   const response = await generateResponse(configHolder.current, groupConfig, remoteJid, {
     expectsImage: canGenerateDirectImages && explicitImageRequest,
   });
-  const resolved = resolveMentions(remoteJid, response);
+  const resolved = resolveMentions(remoteJid, response.text);
   const mentions = resolved.mentions;
   let responseText = sanitizeReplyTextForDelivery(resolved.responseText);
   if (!responseText) {
     responseText = explicitImageRequest ? 'Aí tens.' : '...';
+  }
+
+  if (response.reactionEmoji && reactionTargetKey) {
+    try {
+      await currentSock.sendMessage(remoteJid, {
+        react: {
+          text: response.reactionEmoji,
+          key: reactionTargetKey,
+        },
+      });
+      console.log(`[chat] Sent early reaction to ${remoteJid}: ${response.reactionEmoji}`);
+    } catch (err) {
+      console.error(`Failed to send early reaction to ${remoteJid}:`, err);
+    }
   }
 
   let generatedImage:
@@ -352,7 +367,7 @@ async function sendGeneratedReply(
   addMessage(remoteJid, {
     senderName: primaryBotName,
     senderJid: sendSock.user?.id ?? currentSock.user?.id ?? '',
-    text: response,
+    text: response.text,
     fromBot: true,
     messageId: sent?.key?.id ?? undefined,
     ...(generatedImage && {
@@ -519,6 +534,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
               primaryBotName,
               text,
               explicitImageRequest,
+              msg.key,
               msg,
             );
           } catch (err) {
@@ -597,6 +613,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
               primaryBotName,
               text,
               explicitImageRequest,
+              update.key,
             );
           } catch (err) {
             console.error('Failed to generate/send chat response (edit):', err);
