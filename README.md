@@ -1,9 +1,9 @@
 # WABot
 
-A WhatsApp bot with two features:
+WABot is a WhatsApp group bot with two main features:
 
-1. **Events Bot** — reads events from a Google Sheet and sends messages to a WhatsApp group on a cron schedule.
-2. **LLM Chatbot** — listens on one or more WhatsApp groups and responds via Claude when @mentioned or addressed by name. Each group maintains its own conversation history.
+1. **Events bot**: reads rows from a Google Sheet and sends scheduled messages to configured groups.
+2. **LLM chatbot**: replies in configured groups through Anthropic Claude, with optional web search, X/Twitter link enrichment, Gemini image generation, rate limiting, and a small web admin UI.
 
 ## Setup
 
@@ -18,6 +18,9 @@ cp .env.example .env
 ```bash
 # Production
 npm start
+
+# Production with auto-restart if the process exits
+npm run start:loop
 
 # Development (auto-restart on file changes)
 npm run dev
@@ -35,6 +38,8 @@ Session data is stored in `auth_info_baileys/`. As long as this directory exists
 
 If you get logged out (e.g. you removed the linked device from your phone), delete the `auth_info_baileys/` directory and restart the bot to get a new QR code.
 
+If WhatsApp reports a session conflict, another process is using the same auth state. Stop the other instance before restarting this bot.
+
 ### Finding group JIDs
 
 On startup the bot prints all groups it belongs to with their JIDs:
@@ -46,7 +51,7 @@ On startup the bot prints all groups it belongs to with their JIDs:
 --- End Groups ---
 ```
 
-These JIDs are automatically synced into your `groups.json` config file. You can also find them in the web admin panel if `ADMIN_TOKEN` is set.
+These JIDs are automatically synced into your `groups.json` config file on startup. New groups are appended with a generated `webToken`, and existing group names are refreshed from WhatsApp. You can also inspect them in the web admin panel if `ADMIN_TOKEN` is set.
 
 ## Configuration
 
@@ -56,12 +61,14 @@ Configuration is split between environment variables (`.env`) for secrets and a 
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | For chatbot | Claude API key |
-| `TWITTER_BEARER_TOKEN` | No | X/Twitter API bearer token to fetch tweet text/context from `twitter.com` / `x.com` URLs |
-| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | For events | Google service account email |
-| `GOOGLE_PRIVATE_KEY` | For events | Google service account private key |
+| `ANTHROPIC_API_KEY` | For enabled chatbot groups | Anthropic API key used for text replies and profile summarization |
+| `GEMINI_API_KEY` | No | Enables Gemini image generation for direct image requests and automatic image replies |
+| `TWITTER_BEARER_TOKEN` | No | X/Twitter API bearer token used to enrich `twitter.com` / `x.com` links with tweet text and metrics |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | For groups with `events` | Google service account email |
+| `GOOGLE_PRIVATE_KEY` | For groups with `events` | Google service account private key |
 | `CONFIG_FILE` | No | Path to group config file (default: `./groups.json`) |
-| `ADMIN_TOKEN` | No | Enables the web admin panel at `http://host:WEB_PORT/admin` |
+| `CHAT_HISTORY_MAX` | No | Max in-memory messages kept per group for LLM context (default: `400`) |
+| `ADMIN_TOKEN` | No | Enables the web admin panel at `http://host:WEB_PORT/admin?token=...` |
 | `WEB_PORT` | No | Web admin port (default: `3000`) |
 
 ### Group config (`groups.json`)
@@ -71,13 +78,15 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
 ```json
 {
   "global": {
-    "claudeModel": "claude-sonnet-4-5-20250929",
-    "claudeMaxTokens": 1024
+    "claudeModel": "claude-sonnet-4-6",
+    "claudeMaxTokens": 1024,
+    "geminiImageModel": "gemini-3.1-flash-image-preview"
   },
   "groups": [
     {
       "jid": "120363000000000000@g.us",
       "name": "Family Group",
+      "webToken": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "events": {
         "spreadsheetId": "1aBcDeFgHiJkLmNoPqRsTuVwXyZ",
         "sheetName": "Sheet1",
@@ -85,13 +94,44 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
         "cronSchedule": "0 8 * * *"
       },
       "chatbot": {
-        "botName": "familybot",
-        "systemPrompt": "You are a warm family assistant."
+        "enabled": true,
+        "botName": "familybot, fbot",
+        "systemPrompt": "You are a warm family assistant.",
+        "enableThinking": true,
+        "thinkingBudget": 2000,
+        "enableWebSearch": true,
+        "maxSearches": 3,
+        "hotness": 35,
+        "responseRateLimitCount": 5,
+        "responseRateLimitWindowSec": 60,
+        "responseRateLimitWarn": true,
+        "enableImageGeneration": true,
+        "enableAutoImageReplies": false
       }
     }
   ]
 }
 ```
+
+`groups.example.json` contains a fuller sample. In practice, `groups.json` is usually created and kept up to date by startup sync.
+
+### Group object fields
+
+| Field | Required | Description |
+|---|---|---|
+| `jid` | Yes | WhatsApp group JID |
+| `name` | No | Friendly name, refreshed from WhatsApp on startup |
+| `webToken` | No | Token used by the shareable per-group settings page; generated automatically if missing |
+| `events` | No | Events bot settings for the group |
+| `chatbot` | No | Chatbot settings for the group |
+
+### Global config fields
+
+| Field | Default | Description |
+|---|---|---|
+| `claudeModel` | `claude-sonnet-4-6` | Anthropic model used for chatbot replies |
+| `claudeMaxTokens` | `1024` | Max output tokens for chatbot replies |
+| `geminiImageModel` | `gemini-3.1-flash-image-preview` | Gemini model used for image generation |
 
 ### Events Bot
 
@@ -143,25 +183,56 @@ The sheet must have a header row with these exact column names:
   - `dd/mm` (e.g. `15/03` — year is ignored anyway)
   - `yyyy-mm-dd` (e.g. `2005-07-22`)
 
-Only the day and month are used for matching — the year is ignored. The bot checks if any row's date matches today's date and sends the message template for each match.
+Only the day and month are used for matching; the year is ignored. The bot fetches the sheet fresh on each scheduled run and sends one message per matching row.
 
 ### LLM Chatbot
 
-The chatbot triggers when a user either @mentions the bot, starts a message with the `botName` keyword, or replies to one of the bot's messages. Each group keeps its own buffer of the last 50 messages as context for Claude.
+The chatbot triggers when a user:
+
+1. @mentions the bot
+2. starts a message with the configured `botName`
+3. replies to one of the bot's messages
+4. edits a message so it now starts with `botName` or mentions the bot
+
+Each group keeps its own in-memory conversation history for Claude. The default cap is `400` messages per group and can be changed with `CHAT_HISTORY_MAX`. The bot also periodically summarizes group members into `group_profiles/<group-jid>.json` and feeds those summaries back into later prompts.
 
 #### Chatbot config fields
 
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Set to `false` to disable without removing the config |
-| `botName` | — | **Required.** Keyword prefix that triggers the bot |
-| `systemPrompt` | `You are a helpful assistant...` | Bot persona / system prompt |
+| `botName` | — | **Required.** Keyword prefix that triggers the bot. Multiple aliases can be provided as a comma-separated string |
+| `systemPrompt` | `You are a helpful assistant in a WhatsApp group chat. Be concise and friendly.` | Bot persona / system prompt |
 | `enableThinking` | `false` | Enable Claude's extended thinking |
 | `thinkingBudget` | `2000` | Max thinking tokens (only used if thinking is enabled) |
 | `enableWebSearch` | `false` | Allow Claude to search the web |
 | `maxSearches` | `3` | Max web searches per response |
+| `hotness` | `35` | Controls how sharp or roasty the reply style can get |
+| `responseRateLimitCount` | `5` | Max triggered replies allowed inside the rate limit window |
+| `responseRateLimitWindowSec` | `60` | Rate limit window size in seconds |
+| `responseRateLimitWarn` | `true` | Send one in-character cooldown warning when the limit is hit |
+| `enableImageGeneration` | `true` | Allow Gemini images for explicit image requests |
+| `enableAutoImageReplies` | `false` | Allow the bot to occasionally attach images to normal replies |
 
-If a user message contains `twitter.com`/`x.com` tweet URLs, the bot will try to fetch tweet details through the X API and append that context to the message sent to Claude. Set `TWITTER_BEARER_TOKEN` to enable this.
+If a user message contains `twitter.com`/`x.com` tweet URLs, the bot tries to fetch tweet details through the X API and appends that context to the text sent to Claude. Set `TWITTER_BEARER_TOKEN` to enable this.
+
+### Image generation
+
+If `GEMINI_API_KEY` is set, the chatbot can attach Gemini-generated images:
+
+- `enableImageGeneration`: handles direct requests such as "bot, make a meme about this"
+- `enableAutoImageReplies`: lets the bot decide when an image would improve a reply, with a cooldown between auto-generated images
+
+If Gemini is not configured, the chatbot still replies in text.
+
+### Web admin
+
+If `ADMIN_TOKEN` is set, the bot starts an Express server at `http://localhost:WEB_PORT/admin?token=...`.
+
+- `/admin` shows all known groups and links to group editors
+- `/admin/global` edits `global` config fields stored in `groups.json`
+- `/admin/group/:jid` edits chatbot and events settings for a group and can regenerate its `webToken`
+- `/group/:webToken` is a shareable per-group settings page for chatbot options only
 
 ## Project Structure
 
@@ -175,7 +246,9 @@ src/
   cron.ts           Scheduled event checks
   chat-handler.ts   Chatbot message listener & trigger logic
   chat-history.ts   In-memory message buffer for LLM context
-  llm.ts            Claude API integration
+  llm.ts            Claude prompt building and reply generation
+  gemini.ts         Gemini image generation
   group-profiles.ts Member profile summarization
+  twitter.ts        X/Twitter URL enrichment
   web/              Admin web interface
 ```

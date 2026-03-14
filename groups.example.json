@@ -13,15 +13,21 @@
         "spreadsheetId": "1aBcDeFgHiJkLmNoPqRsTuVwXyZ",
         "sheetName": "Sheet1",
         "messageTemplate": "🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!",
-        "cronSchedule": "0 8 * * *"
+        "cronSchedule": "0 8 * * *",
+        "label": "birthdays"
       },
       "chatbot": {
-        "botName": "familybot",
+        "enabled": true,
+        "botName": "familybot, fbot",
         "systemPrompt": "You are a warm family assistant.",
         "enableThinking": true,
         "thinkingBudget": 2000,
         "enableWebSearch": true,
         "maxSearches": 3,
+        "hotness": 35,
+        "responseRateLimitCount": 5,
+        "responseRateLimitWindowSec": 60,
+        "responseRateLimitWarn": true,
         "enableImageGeneration": true,
         "enableAutoImageReplies": false
       }
@@ -31,8 +37,13 @@
       "name": "Tech Friends",
       "webToken": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
       "chatbot": {
+        "enabled": true,
         "botName": "techbot",
         "systemPrompt": "You are a tech-savvy assistant.",
+        "hotness": 55,
+        "responseRateLimitCount": 8,
+        "responseRateLimitWindowSec": 90,
+        "responseRateLimitWarn": true,
         "enableImageGeneration": true,
         "enableAutoImageReplies": false
       }
