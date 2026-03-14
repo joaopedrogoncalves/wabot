@@ -46,6 +46,7 @@ export function startWebServer(
         if (req.body.claudeModel) raw.global.claudeModel = req.body.claudeModel;
         const maxTokens = parseInt(req.body.claudeMaxTokens, 10);
         if (!isNaN(maxTokens) && maxTokens > 0) raw.global.claudeMaxTokens = maxTokens;
+        if (req.body.geminiImageModel) raw.global.geminiImageModel = req.body.geminiImageModel;
       });
       res.send(renderSuccess('Global settings saved.', `/admin?token=${adminToken}`));
     } catch (err) {
@@ -89,6 +90,8 @@ export function startWebServer(
         const rateLimitWindowSec = parseInt(req.body.responseRateLimitWindowSec, 10);
         if (!isNaN(rateLimitWindowSec) && rateLimitWindowSec > 0) group.chatbot.responseRateLimitWindowSec = rateLimitWindowSec;
         group.chatbot.responseRateLimitWarn = req.body.responseRateLimitWarn === '1';
+        group.chatbot.enableImageGeneration = req.body.enableImageGeneration === '1';
+        group.chatbot.enableAutoImageReplies = req.body.enableAutoImageReplies === '1';
 
         // Events settings
         if (req.body.eventsEnabled) {
@@ -165,6 +168,8 @@ export function startWebServer(
         const rateLimitWindowSec = parseInt(req.body.responseRateLimitWindowSec, 10);
         if (!isNaN(rateLimitWindowSec) && rateLimitWindowSec > 0) g.chatbot.responseRateLimitWindowSec = rateLimitWindowSec;
         g.chatbot.responseRateLimitWarn = req.body.responseRateLimitWarn === '1';
+        g.chatbot.enableImageGeneration = req.body.enableImageGeneration === '1';
+        g.chatbot.enableAutoImageReplies = req.body.enableAutoImageReplies === '1';
       });
 
       // Re-lookup the webToken (it shouldn't change, but use fresh config)

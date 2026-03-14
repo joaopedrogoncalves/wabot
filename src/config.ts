@@ -4,11 +4,13 @@ import { randomUUID } from 'crypto';
 
 export interface GlobalConfig {
   anthropicApiKey: string;
+  geminiApiKey?: string;
   googleServiceAccountEmail: string;
   googlePrivateKey: string;
   twitterBearerToken?: string;
   claudeModel: string;
   claudeMaxTokens: number;
+  geminiImageModel: string;
 }
 
 export interface EventsConfig {
@@ -31,6 +33,8 @@ export interface ChatbotGroupConfig {
   responseRateLimitCount?: number;
   responseRateLimitWindowSec?: number;
   responseRateLimitWarn?: boolean;
+  enableImageGeneration?: boolean;
+  enableAutoImageReplies?: boolean;
 }
 
 export interface GroupConfig {
@@ -72,6 +76,7 @@ export function loadAppConfig(): AppConfig {
   const groupsJson: any[] = rawJson.groups ?? [];
 
   const anthropicApiKey = process.env['ANTHROPIC_API_KEY'] ?? '';
+  const geminiApiKey = process.env['GEMINI_API_KEY'] ?? '';
   const googleServiceAccountEmail = process.env['GOOGLE_SERVICE_ACCOUNT_EMAIL'] ?? '';
   const googlePrivateKey = (process.env['GOOGLE_PRIVATE_KEY'] ?? '').replace(/\\n/g, '\n');
   const twitterBearerToken = process.env['TWITTER_BEARER_TOKEN'] ?? '';
@@ -83,6 +88,8 @@ export function loadAppConfig(): AppConfig {
     twitterBearerToken: twitterBearerToken || undefined,
     claudeModel: globalJson.claudeModel ?? 'claude-sonnet-4-6',
     claudeMaxTokens: globalJson.claudeMaxTokens ?? 1024,
+    geminiApiKey: geminiApiKey || undefined,
+    geminiImageModel: globalJson.geminiImageModel ?? 'gemini-3.1-flash-image-preview',
   };
 
   const groups: GroupConfig[] = groupsJson.map((g: any, i: number) => {
@@ -143,6 +150,8 @@ export function loadAppConfig(): AppConfig {
         responseRateLimitCount: clampInteger(g.chatbot.responseRateLimitCount, 5, 1),
         responseRateLimitWindowSec: clampInteger(g.chatbot.responseRateLimitWindowSec, 60, 1),
         responseRateLimitWarn: g.chatbot.responseRateLimitWarn ?? true,
+        enableImageGeneration: g.chatbot.enableImageGeneration ?? true,
+        enableAutoImageReplies: g.chatbot.enableAutoImageReplies ?? false,
       };
     }
 

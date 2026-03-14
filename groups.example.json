@@ -1,7 +1,8 @@
 {
   "global": {
-    "claudeModel": "claude-sonnet-4-5-20250929",
-    "claudeMaxTokens": 1024
+    "claudeModel": "claude-sonnet-4-6",
+    "claudeMaxTokens": 1024,
+    "geminiImageModel": "gemini-3.1-flash-image-preview"
   },
   "groups": [
     {
@@ -20,7 +21,9 @@
         "enableThinking": true,
         "thinkingBudget": 2000,
         "enableWebSearch": true,
-        "maxSearches": 3
+        "maxSearches": 3,
+        "enableImageGeneration": true,
+        "enableAutoImageReplies": false
       }
     },
     {
@@ -29,7 +32,9 @@
       "webToken": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
       "chatbot": {
         "botName": "techbot",
-        "systemPrompt": "You are a tech-savvy assistant."
+        "systemPrompt": "You are a tech-savvy assistant.",
+        "enableImageGeneration": true,
+        "enableAutoImageReplies": false
       }
     }
   ]

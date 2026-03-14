@@ -1,7 +1,14 @@
 import { areJidsSameUser, downloadMediaMessage, type WASocket } from '@whiskeysockets/baileys';
 import type { ConfigHolder, GroupConfig } from './config.js';
 import { addMessage, findMessageById, getNameToJidMap, updateMessageText } from './chat-history.js';
-import { generateRateLimitWarning, generateResponse } from './llm.js';
+import { generateImage } from './gemini.js';
+import {
+  decideImageForReply,
+  generateImagePromptForDirectRequest,
+  generateImagePromptForReply,
+  generateRateLimitWarning,
+  generateResponse,
+} from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
 import { enrichTextWithTweets } from './twitter.js';
 import { getSocket, onConnectionReady, reportTraffic, waitForConnectionWithTimeout } from './whatsapp.js';
@@ -15,6 +22,11 @@ const GREETING_PREFIXES = [
   'ola',
   'olá',
 ];
+
+const IMAGE_REQUEST_TERMS = /\b(image|picture|pic|photo|meme|poster|illustration|drawing|art|avatar|wallpaper|imagem|foto|meme)\b/iu;
+const IMAGE_REQUEST_CUES = /\b(draw|generate|make|create|render|illustrate|paint|show|send|post|desenha|gera|cria|faz|manda|posta|mostra|ilustra|can you|could you|please|pls|quero|queria|pode)\b/iu;
+const AUTO_IMAGE_LONG_REPLY_THRESHOLD = 260;
+const AUTO_IMAGE_COOLDOWN_MS = 60_000;
 
 function parseBotAliases(botName: string): string[] {
   const aliases = botName
@@ -37,6 +49,10 @@ function isPrefixTrigger(text: string, aliases: string[]): boolean {
     'iu',
   );
   return re.test(text);
+}
+
+function isExplicitImageRequest(text: string): boolean {
+  return IMAGE_REQUEST_TERMS.test(text) && IMAGE_REQUEST_CUES.test(text);
 }
 
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
@@ -102,6 +118,7 @@ type GroupRateLimitState = {
   timestamps: number[];
   warned: boolean;
   warningText?: string;
+  lastImageSentAt?: number;
 };
 
 const groupRateLimits = new Map<string, GroupRateLimitState>();
@@ -147,6 +164,29 @@ function claimRateLimitWarning(groupJid: string, groupConfig: GroupConfig): bool
   return true;
 }
 
+function recordSentImage(groupJid: string): void {
+  const state = getGroupRateLimitState(groupJid);
+  state.lastImageSentAt = Date.now();
+}
+
+function getImageCooldownRemainingMs(groupJid: string): number {
+  const state = getGroupRateLimitState(groupJid);
+  if (!state.lastImageSentAt) return 0;
+  return Math.max(0, AUTO_IMAGE_COOLDOWN_MS - (Date.now() - state.lastImageSentAt));
+}
+
+function isMessageFromBot(
+  sock: WASocket,
+  msg: { key: { fromMe?: boolean | null; participant?: string | null; remoteJid?: string | null } },
+): boolean {
+  if (msg.key.fromMe) return true;
+  const senderJid = msg.key.participant ?? msg.key.remoteJid ?? '';
+  const botJid = sock.user?.id;
+  const botLid = sock.user?.lid;
+  return (!!botJid && areJidsSameUser(senderJid, botJid))
+    || (!!botLid && areJidsSameUser(senderJid, botLid));
+}
+
 function resolveMentions(groupJid: string, response: string): { responseText: string; mentions: string[] } {
   const nameToJid = getNameToJidMap(groupJid);
   const numberToJid = new Map<string, string>();
@@ -177,23 +217,137 @@ function resolveMentions(groupJid: string, response: string): { responseText: st
   return { responseText, mentions };
 }
 
+function sanitizeReplyTextForDelivery(text: string): string {
+  return text
+    .replace(/!\[[\s\S]*?\]\((?:https?:\/\/)?[^)\s]+(?:\?[^)\s]*)?\)/giu, ' ')
+    .replace(/https?:\/\/image\.pollinations\.ai\/\S+/giu, ' ')
+    .replace(/\[\s*(?:imagem|image|image prompt|prompt de imagem|image description|caption)\s*:\s*[\s\S]*?\]/giu, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function sanitizeExplicitImageFallbackText(text: string): string {
+  const firstSegment = text
+    .split(/\n\s*---+\s*\n|\s---\s|\n{2,}/u)[0]
+    ?.replace(/[*_`#]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim() ?? '';
+  if (!firstSegment) return 'Aí tens.';
+  if (firstSegment.length <= 220) return firstSegment;
+
+  const sentenceMatch = firstSegment.match(/^(.{1,220}?[.!?])(?:\s|$)/u);
+  if (sentenceMatch?.[1]) {
+    return sentenceMatch[1].trim();
+  }
+  return `${firstSegment.slice(0, 217).trimEnd()}...`;
+}
+
 async function sendGeneratedReply(
   configHolder: ConfigHolder,
   groupConfig: GroupConfig,
   remoteJid: string,
   primaryBotName: string,
+  latestUserText: string,
+  explicitImageRequest: boolean,
   quoted?: any,
 ): Promise<void> {
   const currentSock = getSocket();
   await currentSock.sendPresenceUpdate('composing', remoteJid);
 
-  const response = await generateResponse(configHolder.current, groupConfig, remoteJid);
-  const { responseText, mentions } = resolveMentions(remoteJid, response);
+  const canGenerateDirectImages = !!configHolder.current.global.geminiApiKey
+    && groupConfig.chatbot?.enableImageGeneration !== false;
+  const canGenerateAutoImages = !!configHolder.current.global.geminiApiKey
+    && groupConfig.chatbot?.enableAutoImageReplies === true;
+  const response = await generateResponse(configHolder.current, groupConfig, remoteJid, {
+    expectsImage: canGenerateDirectImages && explicitImageRequest,
+  });
+  const resolved = resolveMentions(remoteJid, response);
+  const mentions = resolved.mentions;
+  let responseText = sanitizeReplyTextForDelivery(resolved.responseText);
+  if (!responseText) {
+    responseText = explicitImageRequest ? 'Aí tens.' : '...';
+  }
+
+  let generatedImage:
+    | { data: Buffer; mimeType: string }
+    | null = null;
+
+  if (canGenerateDirectImages || canGenerateAutoImages) {
+    try {
+      let imagePrompt: string | null = null;
+      let imageReason: string | null = null;
+      if (explicitImageRequest && canGenerateDirectImages) {
+        imagePrompt = await generateImagePromptForDirectRequest(
+          configHolder.current,
+          groupConfig,
+          remoteJid,
+          latestUserText,
+          responseText,
+        );
+        imageReason = 'direct request';
+      } else if (!explicitImageRequest && canGenerateAutoImages) {
+        const cooldownRemainingMs = getImageCooldownRemainingMs(remoteJid);
+        const shouldForceLongReplyImage = responseText.length >= AUTO_IMAGE_LONG_REPLY_THRESHOLD
+          && cooldownRemainingMs === 0;
+
+        if (shouldForceLongReplyImage) {
+          imagePrompt = await generateImagePromptForReply(
+            configHolder.current,
+            groupConfig,
+            remoteJid,
+            latestUserText,
+            responseText,
+            `reply length ${responseText.length} characters and no bot image sent in the last ${Math.round(AUTO_IMAGE_COOLDOWN_MS / 1000)} seconds`,
+          );
+          imageReason = `long reply heuristic (${responseText.length} chars)`;
+          console.log(`[chat] Auto image forced for ${remoteJid}: long reply (${responseText.length} chars), cooldown clear`);
+        } else if (cooldownRemainingMs > 0) {
+          console.log(`[chat] Auto image skipped for ${remoteJid}: image cooldown active for ${Math.ceil(cooldownRemainingMs / 1000)}s`);
+        } else {
+          const decision = await decideImageForReply(
+            configHolder.current,
+            groupConfig,
+            remoteJid,
+            latestUserText,
+            responseText,
+          );
+          imagePrompt = decision.shouldGenerate ? decision.prompt : null;
+          imageReason = decision.shouldGenerate ? 'LLM auto decision' : null;
+        }
+      }
+
+      if (imagePrompt) {
+        console.log(`[chat] Generating Gemini image for ${remoteJid} with model ${configHolder.current.global.geminiImageModel} (${imageReason ?? 'unspecified'})`);
+        console.log(`[chat] Gemini prompt for ${remoteJid}:\n${imagePrompt}`);
+        generatedImage = await generateImage(configHolder.current.global, imagePrompt);
+        if (!generatedImage) {
+          console.log(`[chat] Gemini returned no image for ${remoteJid}`);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to generate reply image:', err);
+      if (explicitImageRequest) {
+        responseText = sanitizeExplicitImageFallbackText(responseText);
+      }
+    }
+  }
 
   await waitForConnectionWithTimeout(30_000);
   const sendSock = getSocket();
   await sendSock.sendPresenceUpdate('paused', remoteJid);
-  const sent = await sendSock.sendMessage(remoteJid, { text: responseText, mentions }, quoted ? { quoted } : undefined);
+  const sent = generatedImage
+    ? await sendSock.sendMessage(
+        remoteJid,
+        { image: generatedImage.data, mimetype: generatedImage.mimeType, caption: responseText, mentions },
+        quoted ? { quoted } : undefined,
+      )
+    : await sendSock.sendMessage(remoteJid, { text: responseText, mentions }, quoted ? { quoted } : undefined);
+  if (generatedImage) {
+    recordSentImage(remoteJid);
+    console.log(`[chat] Sent image reply to ${remoteJid}: messageId=${sent?.key?.id ?? 'unknown'}, caption="${responseText.slice(0, 160)}${responseText.length > 160 ? '...' : ''}"`);
+  } else {
+    console.log(`[chat] Sent text reply to ${remoteJid}: messageId=${sent?.key?.id ?? 'unknown'}, text="${responseText.slice(0, 160)}${responseText.length > 160 ? '...' : ''}"`);
+  }
 
   addMessage(remoteJid, {
     senderName: primaryBotName,
@@ -201,6 +355,10 @@ async function sendGeneratedReply(
     text: response,
     fromBot: true,
     messageId: sent?.key?.id ?? undefined,
+    ...(generatedImage && {
+      imageData: generatedImage.data.toString('base64'),
+      imageMimeType: generatedImage.mimeType,
+    }),
   });
 
   maybeRefreshProfiles(configHolder.current, remoteJid);
@@ -274,8 +432,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
             ? (targetMsg.fromBot ? 'the bot\'s message' : `${targetMsg.senderName}'s message`)
               + (targetMsg.text ? `: "${targetMsg.text.slice(0, 60)}"` : '')
             : 'a message';
-          const botJid = sock.user?.id;
-          const fromBot = !!botJid && areJidsSameUser(reactorJid, botJid);
+          const fromBot = msg.key.fromMe === true || isMessageFromBot(sock, { key: { participant: reactorJid, remoteJid, fromMe: msg.key.fromMe } });
           addMessage(remoteJid, {
             senderName: reactorName,
             senderJid: reactorJid,
@@ -295,8 +452,9 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const senderJid = msg.key.participant ?? msg.key.remoteJid ?? '';
         const senderName = msg.pushName ?? senderJid;
         const botJid = sock.user?.id;
-        console.log(`[chat] sender=${senderName} (${senderJid}), botJid=${botJid}`);
-        const fromBot = !!botJid && areJidsSameUser(senderJid, botJid);
+        const botLid = sock.user?.lid;
+        console.log(`[chat] sender=${senderName} (${senderJid}), botJid=${botJid}, botLid=${botLid}, fromMe=${msg.key.fromMe === true}`);
+        const fromBot = isMessageFromBot(sock, msg as any);
 
         // Record every message in history (including image-only messages)
         addMessage(remoteJid, {
@@ -316,7 +474,6 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         // Check triggers: @mention, keyword prefix, or reply to bot message
         const mentionedJids = extractMentionedJids(msg);
-        const botLid = sock.user?.lid;
         console.log(`[chat] mentionedJids=${JSON.stringify(mentionedJids)}, botJid=${botJid}, botLid=${botLid}`);
         const mentionTriggered = mentionedJids.some((jid) =>
           (botJid && areJidsSameUser(jid, botJid)) ||
@@ -333,6 +490,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         );
 
         if (!mentionTriggered && !prefixTriggered && !replyTriggered) continue;
+        const explicitImageRequest = isExplicitImageRequest(text);
 
         const limitDecision = admitTriggeredReply(remoteJid, groupConfig);
         if (!limitDecision.allowed) {
@@ -354,7 +512,15 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         withGroupLock(remoteJid, async () => {
           try {
-            await sendGeneratedReply(configHolder, groupConfig, remoteJid, primaryBotName, msg);
+            await sendGeneratedReply(
+              configHolder,
+              groupConfig,
+              remoteJid,
+              primaryBotName,
+              text,
+              explicitImageRequest,
+              msg,
+            );
           } catch (err) {
             console.error('Failed to generate/send chat response:', err);
           }
@@ -401,6 +567,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const prefixTriggered = isPrefixTrigger(text, botAliases);
 
         if (!mentionTriggered && !prefixTriggered) continue;
+        const explicitImageRequest = isExplicitImageRequest(text);
 
         const limitDecision = admitTriggeredReply(remoteJid, groupConfig);
         if (!limitDecision.allowed) {
@@ -423,7 +590,14 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         withGroupLock(remoteJid, async () => {
           try {
-            await sendGeneratedReply(configHolder, groupConfig, remoteJid, primaryBotName);
+            await sendGeneratedReply(
+              configHolder,
+              groupConfig,
+              remoteJid,
+              primaryBotName,
+              text,
+              explicitImageRequest,
+            );
           } catch (err) {
             console.error('Failed to generate/send chat response (edit):', err);
           }

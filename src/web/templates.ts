@@ -111,8 +111,14 @@ export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): st
         <label>Claude Max Tokens</label>
         <input type="number" name="claudeMaxTokens" value="${g.claudeMaxTokens}" min="1">
 
+        <label>Gemini Image Model</label>
+        <input type="text" name="geminiImageModel" value="${esc(g.geminiImageModel)}">
+
         <label>Anthropic API Key</label>
         <p class="masked">${g.anthropicApiKey ? 'Set (from environment)' : 'Not set'}</p>
+
+        <label>Gemini API Key</label>
+        <p class="masked">${g.geminiApiKey ? 'Set (from environment)' : 'Not set'}</p>
 
         <label>Google Service Account</label>
         <p class="masked">${g.googleServiceAccountEmail ? 'Set (from environment)' : 'Not set'}</p>
@@ -192,6 +198,16 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
           <label for="responseRateLimitWarn">Send one cooldown warning</label>
         </div>
 
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableImageGeneration" name="enableImageGeneration" value="1" ${chatbot?.enableImageGeneration !== false ? 'checked' : ''}>
+          <label for="enableImageGeneration">Allow image generation on direct requests</label>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableAutoImageReplies" name="enableAutoImageReplies" value="1" ${chatbot?.enableAutoImageReplies ? 'checked' : ''}>
+          <label for="enableAutoImageReplies">Allow automatic image replies</label>
+        </div>
+
         <h2 style="margin-top:1.5rem">Events Settings</h2>
 
         <div class="checkbox-row">
@@ -262,6 +278,16 @@ export function renderGroupEdit(group: GroupConfig, saved?: boolean): string {
         <div class="checkbox-row">
           <input type="checkbox" id="responseRateLimitWarn" name="responseRateLimitWarn" value="1" ${chatbot?.responseRateLimitWarn !== false ? 'checked' : ''}>
           <label for="responseRateLimitWarn">Send one cooldown warning</label>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableImageGeneration" name="enableImageGeneration" value="1" ${chatbot?.enableImageGeneration !== false ? 'checked' : ''}>
+          <label for="enableImageGeneration">Allow image generation on direct requests</label>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableAutoImageReplies" name="enableAutoImageReplies" value="1" ${chatbot?.enableAutoImageReplies ? 'checked' : ''}>
+          <label for="enableAutoImageReplies">Allow automatic image replies</label>
         </div>
 
         <br><br>
