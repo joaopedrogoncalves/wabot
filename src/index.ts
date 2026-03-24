@@ -3,7 +3,7 @@ import { syncGroups } from './config.js';
 import type { ConfigHolder } from './config.js';
 import { connectToWhatsApp, listGroups } from './whatsapp.js';
 import { fetchEventRows } from './sheets.js';
-import { startEventCrons } from './cron.js';
+import { startEventCrons, startScheduledPostCrons } from './cron.js';
 import { setupChatHandler } from './chat-handler.js';
 import { logTwitterConfigStatus } from './twitter.js';
 import { startWebServer } from './web/server.js';
@@ -21,8 +21,16 @@ async function main() {
 
   const eventGroups = config.groups.filter((g) => g.events);
   const chatbotGroups = config.groups.filter((g) => g.chatbot && g.chatbot.enabled !== false);
+  const scheduledPostGroups = config.groups.filter((g) => (g.scheduledPosts?.some((job) => job.enabled !== false)));
+  const scheduledPostCount = scheduledPostGroups.reduce(
+    (count, group) => count + (group.scheduledPosts?.filter((job) => job.enabled !== false).length ?? 0),
+    0,
+  );
 
-  console.log(`Loaded ${config.groups.length} group(s): ${eventGroups.length} with events, ${chatbotGroups.length} with chatbot`);
+  console.log(
+    `Loaded ${config.groups.length} group(s): ${eventGroups.length} with events, ` +
+    `${chatbotGroups.length} with chatbot, ${scheduledPostCount} scheduled post job(s)`,
+  );
   logTwitterConfigStatus(config.global);
 
   if (chatbotGroups.length > 0) {
@@ -51,6 +59,12 @@ async function main() {
     startEventCrons(configHolder);
   } else {
     console.log('No groups with events configured.');
+  }
+
+  if (scheduledPostCount > 0) {
+    startScheduledPostCrons(configHolder);
+  } else {
+    console.log('No scheduled post jobs configured.');
   }
 
   // Start web admin if ADMIN_TOKEN is set

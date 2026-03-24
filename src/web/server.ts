@@ -11,6 +11,84 @@ import {
   renderError,
 } from './templates.js';
 
+function getTrimmedString(rawValue: unknown): string {
+  return typeof rawValue === 'string' ? rawValue.trim() : '';
+}
+
+function parsePositiveInt(rawValue: unknown, fieldName: string, options?: { min?: number; max?: number }): number | undefined {
+  const text = getTrimmedString(rawValue);
+  if (!text) return undefined;
+
+  const value = parseInt(text, 10);
+  if (Number.isNaN(value)) {
+    throw new Error(`${fieldName} must be a number.`);
+  }
+
+  if (options?.min !== undefined && value < options.min) {
+    throw new Error(`${fieldName} must be at least ${options.min}.`);
+  }
+
+  if (options?.max !== undefined && value > options.max) {
+    throw new Error(`${fieldName} must be at most ${options.max}.`);
+  }
+
+  return value;
+}
+
+function parseScheduledPostsForm(body: Record<string, unknown>): any[] {
+  const count = parsePositiveInt(body.scheduledPostCount, 'Scheduled post count', { min: 0, max: 100 }) ?? 0;
+  const jobs: any[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const label = getTrimmedString(body[`scheduledPostLabel_${index}`]);
+    const cronSchedule = getTrimmedString(body[`scheduledPostCronSchedule_${index}`]);
+    const prompt = getTrimmedString(body[`scheduledPostPrompt_${index}`]);
+    const lookbackHours = parsePositiveInt(body[`scheduledPostLookbackHours_${index}`], `Scheduled post ${index + 1} lookback hours`, { min: 1, max: 168 });
+    const maxSearches = parsePositiveInt(body[`scheduledPostMaxSearches_${index}`], `Scheduled post ${index + 1} max searches`, { min: 1, max: 10 });
+    const enabled = body[`scheduledPostEnabled_${index}`] === '1';
+    const enableWebSearch = body[`scheduledPostEnableWebSearch_${index}`] === '1';
+    const hasContent = !!(label || cronSchedule || prompt || lookbackHours !== undefined || maxSearches !== undefined || enabled || enableWebSearch);
+
+    if (!hasContent) continue;
+    if (!cronSchedule) throw new Error(`Scheduled post ${index + 1} is missing a cron schedule.`);
+    if (!prompt) throw new Error(`Scheduled post ${index + 1} is missing a prompt.`);
+
+    jobs.push({
+      enabled,
+      label,
+      cronSchedule,
+      prompt,
+      lookbackHours,
+      enableWebSearch,
+      maxSearches,
+    });
+  }
+
+  return jobs;
+}
+
+function parseScheduledPosts(rawValue: unknown, body: Record<string, unknown>): any[] {
+  if (body.scheduledPostCount !== undefined) {
+    return parseScheduledPostsForm(body);
+  }
+
+  const text = getTrimmedString(rawValue);
+  if (!text) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`Invalid scheduled posts JSON: ${err}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('Scheduled posts JSON must be an array.');
+  }
+
+  return parsed;
+}
+
 export function startWebServer(
   configHolder: ConfigHolder,
   configPath: string,
@@ -103,6 +181,8 @@ export function startWebServer(
         } else {
           delete group.events;
         }
+
+        group.scheduledPosts = parseScheduledPosts(req.body.scheduledPostsJson, req.body);
       });
       res.send(renderSuccess('Group settings saved.', `/admin?token=${adminToken}`));
     } catch (err) {
@@ -170,6 +250,7 @@ export function startWebServer(
         g.chatbot.responseRateLimitWarn = req.body.responseRateLimitWarn === '1';
         g.chatbot.enableImageGeneration = req.body.enableImageGeneration === '1';
         g.chatbot.enableAutoImageReplies = req.body.enableAutoImageReplies === '1';
+        g.scheduledPosts = parseScheduledPosts(req.body.scheduledPostsJson, req.body);
       });
 
       // Re-lookup the webToken (it shouldn't change, but use fresh config)

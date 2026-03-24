@@ -37,12 +37,23 @@ export interface ChatbotGroupConfig {
   enableAutoImageReplies?: boolean;
 }
 
+export interface ScheduledPostJobConfig {
+  enabled?: boolean;
+  label?: string;
+  cronSchedule: string;
+  prompt: string;
+  lookbackHours?: number;
+  enableWebSearch?: boolean;
+  maxSearches?: number;
+}
+
 export interface GroupConfig {
   jid: string;
   name?: string;
   webToken?: string;
   events?: EventsConfig;
   chatbot?: ChatbotGroupConfig;
+  scheduledPosts?: ScheduledPostJobConfig[];
 }
 
 export interface AppConfig {
@@ -153,6 +164,41 @@ export function loadAppConfig(): AppConfig {
         enableImageGeneration: g.chatbot.enableImageGeneration ?? true,
         enableAutoImageReplies: g.chatbot.enableAutoImageReplies ?? false,
       };
+    }
+
+    const scheduledPostsRaw: any[] = Array.isArray(g.scheduledPosts) ? g.scheduledPosts : [];
+    if (scheduledPostsRaw.length > 0) {
+      group.scheduledPosts = scheduledPostsRaw.map((job: any, jobIndex: number) => {
+        const jobEnabled = job?.enabled !== false;
+        if (jobEnabled) {
+          if (!job?.prompt) {
+            throw new Error(
+              `Group "${g.name ?? g.jid}" scheduled post at index ${jobIndex} is missing "prompt"`,
+            );
+          }
+          if (!job?.cronSchedule) {
+            throw new Error(
+              `Group "${g.name ?? g.jid}" scheduled post "${job.label ?? jobIndex + 1}" is missing "cronSchedule"`,
+            );
+          }
+          if (!anthropicApiKey) {
+            throw new Error(
+              `Group "${g.name ?? g.jid}" has scheduled posts but ANTHROPIC_API_KEY is not set`,
+            );
+          }
+        }
+
+        const label = String(job?.label ?? '').trim() || `scheduled-post-${jobIndex + 1}`;
+        return {
+          enabled: jobEnabled,
+          label,
+          cronSchedule: job?.cronSchedule ?? '0 9 * * *',
+          prompt: job?.prompt ?? '',
+          lookbackHours: clampInteger(job?.lookbackHours, 24, 1, 168),
+          enableWebSearch: job?.enableWebSearch ?? false,
+          maxSearches: clampInteger(job?.maxSearches, 3, 1, 10),
+        } satisfies ScheduledPostJobConfig;
+      });
     }
 
     return group;

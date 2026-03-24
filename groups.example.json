@@ -30,7 +30,18 @@
         "responseRateLimitWarn": true,
         "enableImageGeneration": true,
         "enableAutoImageReplies": false
-      }
+      },
+      "scheduledPosts": [
+        {
+          "enabled": true,
+          "label": "morning-news-roundup",
+          "cronSchedule": "0 8 * * *",
+          "prompt": "Every morning, review the last day of discussion, search the web for major news when useful, correct any factual mistakes made in chat, and post a concise roundup with one companion image.",
+          "lookbackHours": 24,
+          "enableWebSearch": true,
+          "maxSearches": 3
+        }
+      ]
     },
     {
       "jid": "120360000000000001@g.us",
@@ -46,7 +57,18 @@
         "responseRateLimitWarn": true,
         "enableImageGeneration": true,
         "enableAutoImageReplies": false
-      }
+      },
+      "scheduledPosts": [
+        {
+          "enabled": true,
+          "label": "evening-roast",
+          "cronSchedule": "0 19 * * *",
+          "prompt": "At the end of the day, summarize the funniest ongoing thread in the group and post a playful image-led recap in the group's voice.",
+          "lookbackHours": 12,
+          "enableWebSearch": false,
+          "maxSearches": 3
+        }
+      ]
     }
   ]
 }

@@ -8,6 +8,7 @@ import {
   generateImagePromptForReply,
   generateRateLimitWarning,
   generateResponse,
+  recordRecentReactionEmoji,
 } from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
 import { enrichTextWithTweets } from './twitter.js';
@@ -277,6 +278,7 @@ async function sendGeneratedReply(
           key: reactionTargetKey,
         },
       });
+      recordRecentReactionEmoji(remoteJid, response.reactionEmoji);
       console.log(`[chat] Sent early reaction to ${remoteJid}: ${response.reactionEmoji}`);
     } catch (err) {
       console.error(`Failed to send early reaction to ${remoteJid}:`, err);
@@ -291,14 +293,24 @@ async function sendGeneratedReply(
     try {
       let imagePrompt: string | null = null;
       let imageReason: string | null = null;
+      let imagePlanContext: Parameters<typeof generateImage>[2] | undefined;
       if (explicitImageRequest && canGenerateDirectImages) {
-        imagePrompt = await generateImagePromptForDirectRequest(
+        const imagePlan = await generateImagePromptForDirectRequest(
           configHolder.current,
           groupConfig,
           remoteJid,
           latestUserText,
           responseText,
         );
+        imagePrompt = imagePlan?.prompt ?? null;
+        imagePlanContext = imagePlan ? {
+          literalness: imagePlan.literalness,
+          mood: imagePlan.mood,
+          style: imagePlan.style,
+          keySubjects: imagePlan.keySubjects,
+          mustAvoid: imagePlan.mustAvoid,
+          textInImage: imagePlan.textInImage,
+        } : undefined;
         imageReason = 'direct request';
       } else if (!explicitImageRequest && canGenerateAutoImages) {
         const cooldownRemainingMs = getImageCooldownRemainingMs(remoteJid);
@@ -306,7 +318,7 @@ async function sendGeneratedReply(
           && cooldownRemainingMs === 0;
 
         if (shouldForceLongReplyImage) {
-          imagePrompt = await generateImagePromptForReply(
+          const imagePlan = await generateImagePromptForReply(
             configHolder.current,
             groupConfig,
             remoteJid,
@@ -314,6 +326,15 @@ async function sendGeneratedReply(
             responseText,
             `reply length ${responseText.length} characters and no bot image sent in the last ${Math.round(AUTO_IMAGE_COOLDOWN_MS / 1000)} seconds`,
           );
+          imagePrompt = imagePlan?.prompt ?? null;
+          imagePlanContext = imagePlan ? {
+            literalness: imagePlan.literalness,
+            mood: imagePlan.mood,
+            style: imagePlan.style,
+            keySubjects: imagePlan.keySubjects,
+            mustAvoid: imagePlan.mustAvoid,
+            textInImage: imagePlan.textInImage,
+          } : undefined;
           imageReason = `long reply heuristic (${responseText.length} chars)`;
           console.log(`[chat] Auto image forced for ${remoteJid}: long reply (${responseText.length} chars), cooldown clear`);
         } else if (cooldownRemainingMs > 0) {
@@ -326,7 +347,15 @@ async function sendGeneratedReply(
             latestUserText,
             responseText,
           );
-          imagePrompt = decision.shouldGenerate ? decision.prompt : null;
+          imagePrompt = decision.shouldGenerate ? decision.image?.prompt ?? null : null;
+          imagePlanContext = decision.shouldGenerate && decision.image ? {
+            literalness: decision.image.literalness,
+            mood: decision.image.mood,
+            style: decision.image.style,
+            keySubjects: decision.image.keySubjects,
+            mustAvoid: decision.image.mustAvoid,
+            textInImage: decision.image.textInImage,
+          } : undefined;
           imageReason = decision.shouldGenerate ? 'LLM auto decision' : null;
         }
       }
@@ -334,9 +363,24 @@ async function sendGeneratedReply(
       if (imagePrompt) {
         console.log(`[chat] Generating Gemini image for ${remoteJid} with model ${configHolder.current.global.geminiImageModel} (${imageReason ?? 'unspecified'})`);
         console.log(`[chat] Gemini prompt for ${remoteJid}:\n${imagePrompt}`);
-        generatedImage = await generateImage(configHolder.current.global, imagePrompt);
+        if (imagePlanContext) {
+          console.log(`[chat] Gemini image plan for ${remoteJid}: ${JSON.stringify(imagePlanContext)}`);
+        }
+        const imageStartedAt = Date.now();
+        generatedImage = await generateImage(configHolder.current.global, imagePrompt, {
+          latestUserText,
+          replyText: responseText,
+          visualBrief: imagePrompt,
+          reason: imageReason ?? undefined,
+          ...imagePlanContext,
+        });
         if (!generatedImage) {
           console.log(`[chat] Gemini returned no image for ${remoteJid}`);
+        } else {
+          console.log(
+            `[chat] Gemini image ready for ${remoteJid} after ${Date.now() - imageStartedAt}ms ` +
+            `mimeType=${generatedImage.mimeType}`,
+          );
         }
       }
     } catch (err) {

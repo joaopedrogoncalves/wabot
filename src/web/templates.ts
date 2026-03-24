@@ -1,4 +1,4 @@
-import type { AppConfig, GlobalConfig, GroupConfig } from '../config.js';
+import type { AppConfig, GlobalConfig, GroupConfig, ScheduledPostJobConfig } from '../config.js';
 
 function esc(str: string): string {
   return str
@@ -57,6 +57,15 @@ function renderLayout(title: string, bodyHtml: string): string {
   .checkbox-row label { display: inline; margin: 0; }
   .nav { margin-bottom: 1rem; }
   .nav a { margin-right: 1rem; }
+  .muted { color: #666; font-size: .9rem; }
+  .scheduled-job-list { display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem; }
+  .scheduled-job { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; background: #fafafa; }
+  .scheduled-job-header { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: .75rem; }
+  .scheduled-job-title { font-size: 1rem; font-weight: 600; margin: 0; }
+  .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+  .field-grid > div label:first-child { margin-top: 0; }
+  .textarea-compact { min-height: 140px; }
+  .empty-state { padding: 1rem; border: 1px dashed #bbb; border-radius: 8px; background: #fafafa; color: #666; }
 </style>
 </head>
 <body>
@@ -65,20 +74,154 @@ ${bodyHtml}
 </html>`;
 }
 
+function renderScheduledPostCard(
+  prefix: string,
+  index: number,
+  job?: ScheduledPostJobConfig,
+): string {
+  return `<div class="scheduled-job" data-scheduled-job>
+    <div class="scheduled-job-header">
+      <p class="scheduled-job-title">Scheduled Job <span data-job-number>${index + 1}</span></p>
+      <button type="button" class="btn btn-danger" data-remove-scheduled-job>Remove</button>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="${prefix}-enabled-${index}" name="${prefix}Enabled_${index}" value="1" ${job?.enabled !== false ? 'checked' : ''}>
+      <label for="${prefix}-enabled-${index}">Enabled</label>
+    </div>
+
+    <div class="field-grid">
+      <div>
+        <label>Label</label>
+        <input type="text" name="${prefix}Label_${index}" value="${esc(job?.label ?? '')}" placeholder="morning-news-roundup">
+      </div>
+      <div>
+        <label>Cron Schedule</label>
+        <input type="text" name="${prefix}CronSchedule_${index}" value="${esc(job?.cronSchedule ?? '')}" placeholder="0 8 * * *">
+      </div>
+      <div>
+        <label>Lookback Hours</label>
+        <input type="number" name="${prefix}LookbackHours_${index}" value="${job?.lookbackHours ?? 24}" min="1" max="168">
+      </div>
+      <div>
+        <label>Max Searches</label>
+        <input type="number" name="${prefix}MaxSearches_${index}" value="${job?.maxSearches ?? 3}" min="1" max="10">
+      </div>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="${prefix}-web-${index}" name="${prefix}EnableWebSearch_${index}" value="1" ${job?.enableWebSearch ? 'checked' : ''}>
+      <label for="${prefix}-web-${index}">Enable web search for this job</label>
+    </div>
+
+    <label>Prompt</label>
+    <textarea class="textarea-compact" name="${prefix}Prompt_${index}" placeholder="Every morning, review the last day of discussion, search the web when useful, and post an image-led roundup.">${esc(job?.prompt ?? '')}</textarea>
+  </div>`;
+}
+
+function renderScheduledPostsEditor(group: GroupConfig, editorId: string): string {
+  const jobs = group.scheduledPosts ?? [];
+  const cardsHtml = jobs.map((job, index) => renderScheduledPostCard('scheduledPost', index, job)).join('');
+  const emptyStateId = `${editorId}-empty`;
+  const listId = `${editorId}-list`;
+  const countId = `${editorId}-count`;
+  const addButtonId = `${editorId}-add`;
+  const template = renderScheduledPostCard('scheduledPost', 0);
+
+  return `
+    <p class="muted">Create autonomous image posts that run on a cron schedule using recent chat context.</p>
+    <p class="muted">Cron uses the server timezone. If image generation fails, the bot falls back to caption-only.</p>
+    <input type="hidden" name="scheduledPostCount" id="${esc(countId)}" value="${jobs.length}">
+    <div id="${esc(emptyStateId)}" class="empty-state" ${jobs.length > 0 ? 'style="display:none"' : ''}>No scheduled jobs configured yet.</div>
+    <div id="${esc(listId)}" class="scheduled-job-list">${cardsHtml}</div>
+    <button type="button" id="${esc(addButtonId)}" class="btn btn-secondary">Add Scheduled Job</button>
+    <template id="${esc(editorId)}-template">${template}</template>
+    <script>
+      (() => {
+        const list = document.getElementById(${JSON.stringify(listId)});
+        const emptyState = document.getElementById(${JSON.stringify(emptyStateId)});
+        const countInput = document.getElementById(${JSON.stringify(countId)});
+        const addButton = document.getElementById(${JSON.stringify(addButtonId)});
+        const template = document.getElementById(${JSON.stringify(`${editorId}-template`)});
+        const form = addButton?.closest('form');
+
+        if (!list || !emptyState || !countInput || !addButton || !template || !form) return;
+
+        function renumber() {
+          const jobs = Array.from(list.querySelectorAll('[data-scheduled-job]'));
+          jobs.forEach((job, index) => {
+            job.querySelectorAll('input, textarea').forEach((field) => {
+              if (!(field instanceof HTMLInputElement) && !(field instanceof HTMLTextAreaElement)) return;
+              const currentName = field.getAttribute('name');
+              if (currentName) {
+                field.setAttribute('name', currentName.replace(/_\\d+$/, '_' + index));
+              }
+
+              const currentId = field.getAttribute('id');
+              if (currentId) {
+                field.setAttribute('id', currentId.replace(/-\\d+$/, '-' + index));
+              }
+            });
+
+            job.querySelectorAll('label[for]').forEach((label) => {
+              const currentFor = label.getAttribute('for');
+              if (currentFor) {
+                label.setAttribute('for', currentFor.replace(/-\\d+$/, '-' + index));
+              }
+            });
+
+            const number = job.querySelector('[data-job-number]');
+            if (number) number.textContent = String(index + 1);
+          });
+
+          countInput.value = String(jobs.length);
+          emptyState.style.display = jobs.length > 0 ? 'none' : 'block';
+        }
+
+        function wireCard(card) {
+          const removeButton = card.querySelector('[data-remove-scheduled-job]');
+          if (removeButton) {
+            removeButton.addEventListener('click', () => {
+              card.remove();
+              renumber();
+            });
+          }
+        }
+
+        function addCard() {
+          const wrapper = document.createElement('div');
+          wrapper.innerHTML = template.innerHTML.trim();
+          const card = wrapper.firstElementChild;
+          if (!card) return;
+          list.appendChild(card);
+          wireCard(card);
+          renumber();
+        }
+
+        Array.from(list.querySelectorAll('[data-scheduled-job]')).forEach(wireCard);
+        addButton.addEventListener('click', addCard);
+        form.addEventListener('submit', renumber);
+        renumber();
+      })();
+    </script>`;
+}
+
 export function renderAdminDashboard(config: AppConfig, adminToken: string): string {
   const rows = config.groups.map((g) => {
     const name = esc(g.name ?? g.jid);
     const hasEvents = g.events ? '<span class="badge badge-green">events</span>' : '';
     const chatbotActive = g.chatbot && g.chatbot.enabled !== false;
     const hasChatbot = chatbotActive ? '<span class="badge badge-green">chatbot</span>' : '';
-    const noneLabel = !g.events && !chatbotActive ? '<span class="badge badge-gray">none</span>' : '';
+    const scheduledActive = (g.scheduledPosts?.some((job) => job.enabled !== false)) ?? false;
+    const hasScheduled = scheduledActive ? '<span class="badge badge-green">scheduled</span>' : '';
+    const noneLabel = !g.events && !chatbotActive && !scheduledActive ? '<span class="badge badge-gray">none</span>' : '';
     const groupUrl = g.webToken ? `/group/${esc(g.webToken)}` : '';
     const groupLink = groupUrl
       ? `<div class="group-link">Per-group link: <a href="${groupUrl}">${groupUrl}</a></div>`
       : '';
     return `<tr>
       <td>${name}<br><small style="color:#888">${esc(g.jid)}</small>${groupLink}</td>
-      <td>${hasEvents} ${hasChatbot} ${noneLabel}</td>
+      <td>${hasEvents} ${hasChatbot} ${hasScheduled} ${noneLabel}</td>
       <td><a href="/admin/group/${encodeURIComponent(g.jid)}?token=${esc(adminToken)}" class="btn btn-primary">Edit</a></td>
     </tr>`;
   }).join('\n');
@@ -227,6 +370,9 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
         <label>Cron Schedule</label>
         <input type="text" name="cronSchedule" value="${esc(events?.cronSchedule ?? '0 8 * * *')}">
 
+        <h2 style="margin-top:1.5rem">Scheduled Posts</h2>
+        ${renderScheduledPostsEditor(group, 'admin-scheduled-posts')}
+
         <br><br>
         <button type="submit" class="btn btn-primary">Save</button>
       </form>
@@ -289,6 +435,9 @@ export function renderGroupEdit(group: GroupConfig, saved?: boolean): string {
           <input type="checkbox" id="enableAutoImageReplies" name="enableAutoImageReplies" value="1" ${chatbot?.enableAutoImageReplies ? 'checked' : ''}>
           <label for="enableAutoImageReplies">Allow automatic image replies</label>
         </div>
+
+        <h2 style="margin-top:1.5rem">Scheduled Posts</h2>
+        ${renderScheduledPostsEditor(group, 'group-scheduled-posts')}
 
         <br><br>
         <button type="submit" class="btn btn-primary">Save</button>

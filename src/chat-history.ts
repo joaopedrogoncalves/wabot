@@ -40,6 +40,18 @@ export function getHistory(groupJid: string): readonly ChatMessage[] {
   return historyByGroup.get(groupJid) ?? [];
 }
 
+export function getHistorySince(
+  groupJid: string,
+  since: number,
+  limit?: number,
+): readonly ChatMessage[] {
+  const messages = (historyByGroup.get(groupJid) ?? []).filter((msg) => (msg.timestamp ?? 0) >= since);
+  if (limit == null || limit <= 0 || messages.length <= limit) {
+    return messages;
+  }
+  return messages.slice(-limit);
+}
+
 export function getRecentBotMessages(groupJid: string, limit = 8): readonly ChatMessage[] {
   if (limit <= 0) return [];
   const messages = historyByGroup.get(groupJid) ?? [];

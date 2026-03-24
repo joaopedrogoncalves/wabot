@@ -100,6 +100,12 @@ function stopHeartbeat(): void {
   }
 }
 
+function startReconnectAttempt(source: string): void {
+  void connectToWhatsApp().catch((err) => {
+    console.error(`[wa#${socketId}] Reconnect attempt failed (${source}):`, err);
+  });
+}
+
 function forceReconnect(reason: string): void {
   console.error(`[wa#${socketId}] ${reason}. Forcing reconnect...`);
   connectionOpen = false;
@@ -116,7 +122,7 @@ function forceReconnect(reason: string): void {
     try { currentSock.end(undefined); } catch {}
     currentSock = null;
   }
-  void connectToWhatsApp();
+  startReconnectAttempt('forced reconnect');
 }
 
 function startHeartbeat(): void {
@@ -207,77 +213,98 @@ async function connectToWhatsAppInternal(): Promise<void> {
   currentSock = sock;
   connectionOpen = false;
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log('Scan this QR code with WhatsApp:');
-      qrcode.generate(qr, { small: true });
-    }
-
-    if (connection === 'close') {
-      if (sock !== currentSock) {
-        console.log(`[wa#${id}] Ignoring close from stale socket`);
-        return;
-      }
-
-      const uptime = formatUptime(connectedSince);
-      connectionOpen = false;
-      connectedSince = null;
-      stopHeartbeat();
-
-      const boomErr = lastDisconnect?.error as Boom | undefined;
-      const statusCode = boomErr?.output?.statusCode;
-      const errorMsg = boomErr?.message ?? 'unknown';
-      const wasReplaced = statusCode === DisconnectReason.connectionReplaced;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !wasReplaced;
-
-      console.log(
-        `[wa#${id}] Connection closed: status=${statusCode} error="${errorMsg}" uptime=${uptime}. ` +
-        (shouldReconnect ? `Reconnecting in ${reconnectDelay / 1000}s...` : 'Not reconnecting.')
-      );
-
-      if (shouldReconnect) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          void connectToWhatsApp();
-        }, reconnectDelay);
-        // Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s max
-        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
-      } else {
-        if (statusCode === DisconnectReason.loggedOut) {
-          console.log('Logged out from WhatsApp. Please delete auth_info_baileys/ and restart.');
-        } else if (wasReplaced) {
-          console.error(
-            'WhatsApp session conflict (440/connectionReplaced): another instance is using the same auth session. ' +
-            'Stop the other instance and restart this bot.'
-          );
-        }
-        process.exit(1);
-      }
-    }
-
-    if (connection === 'open') {
-      if (sock !== currentSock) {
-        console.log(`[wa#${id}] Ignoring open from stale socket`);
-        return;
-      }
-      connectedSince = Date.now();
-      reconnectCount = 0;
-      reconnectDelay = 2_000; // Reset backoff on successful connection
-      console.log(`[wa#${id}] Connected to WhatsApp`);
-      startHeartbeat();
-      notifyConnectionOpen();
-      for (const cb of connectionReadyCallbacks) {
-        cb(sock);
-      }
-    }
-  });
-
   sock.ev.on('creds.update', saveCreds);
 
-  // Wait for this specific connection attempt to open
-  await waitForConnection();
+  await new Promise<void>((resolve, reject) => {
+    let opened = false;
+    let settled = false;
+
+    function settleSuccess(): void {
+      if (settled) return;
+      settled = true;
+      resolve();
+    }
+
+    function settleFailure(err: Error): void {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    }
+
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        console.log('Scan this QR code with WhatsApp:');
+        qrcode.generate(qr, { small: true });
+      }
+
+      if (connection === 'close') {
+        if (sock !== currentSock) {
+          console.log(`[wa#${id}] Ignoring close from stale socket`);
+          return;
+        }
+
+        const uptime = formatUptime(connectedSince);
+        connectionOpen = false;
+        connectedSince = null;
+        stopHeartbeat();
+
+        const boomErr = lastDisconnect?.error as Boom | undefined;
+        const statusCode = boomErr?.output?.statusCode;
+        const errorMsg = boomErr?.message ?? 'unknown';
+        const wasReplaced = statusCode === DisconnectReason.connectionReplaced;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !wasReplaced;
+
+        console.log(
+          `[wa#${id}] Connection closed: status=${statusCode} error="${errorMsg}" uptime=${uptime}. ` +
+          (shouldReconnect ? `Reconnecting in ${reconnectDelay / 1000}s...` : 'Not reconnecting.')
+        );
+
+        if (shouldReconnect) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            startReconnectAttempt(`socket close wa#${id}`);
+          }, reconnectDelay);
+          // Exponential backoff: 2s → 4s → 8s → 16s → 32s → 60s max
+          reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+        } else {
+          if (statusCode === DisconnectReason.loggedOut) {
+            console.log('Logged out from WhatsApp. Please delete auth_info_baileys/ and restart.');
+          } else if (wasReplaced) {
+            console.error(
+              'WhatsApp session conflict (440/connectionReplaced): another instance is using the same auth session. ' +
+              'Stop the other instance and restart this bot.'
+            );
+          }
+          process.exit(1);
+        }
+
+        if (!opened) {
+          settleFailure(new Error(`WhatsApp connection attempt failed before opening: status=${statusCode} error="${errorMsg}"`));
+        }
+      }
+
+      if (connection === 'open') {
+        if (sock !== currentSock) {
+          console.log(`[wa#${id}] Ignoring open from stale socket`);
+          return;
+        }
+        opened = true;
+        connectedSince = Date.now();
+        reconnectCount = 0;
+        reconnectDelay = 2_000; // Reset backoff on successful connection
+        console.log(`[wa#${id}] Connected to WhatsApp`);
+        startHeartbeat();
+        notifyConnectionOpen();
+        for (const cb of connectionReadyCallbacks) {
+          cb(sock);
+        }
+        settleSuccess();
+      }
+    });
+  });
+
 }
 
 export async function sendGroupMessage(
@@ -287,6 +314,17 @@ export async function sendGroupMessage(
   await waitForConnection();
   const sock = getSocket();
   await sock.sendMessage(groupJid, { text });
+}
+
+export async function sendGroupImageMessage(
+  groupJid: string,
+  image: Buffer,
+  mimeType: string,
+  caption: string,
+): Promise<void> {
+  await waitForConnection();
+  const sock = getSocket();
+  await sock.sendMessage(groupJid, { image, mimetype: mimeType, caption });
 }
 
 export async function listGroups(): Promise<Record<string, string>> {

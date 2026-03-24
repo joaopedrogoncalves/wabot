@@ -1,7 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { AppConfig, GroupConfig } from './config.js';
+import type { AppConfig, GroupConfig, ScheduledPostJobConfig } from './config.js';
+import type { ChatMessage } from './chat-history.js';
 import { getRecentBotMessages, toAnthropicMessages } from './chat-history.js';
 import { getProfilesPrompt } from './group-profiles.js';
+import type { LatestNewsDigest } from './news.js';
 
 let client: Anthropic | null = null;
 
@@ -14,20 +16,44 @@ export type GeneratedReply = {
   reactionEmoji?: string;
 };
 
-type JsonImagePrompt = {
+export type ImageLiteralness = 'vibe' | 'balanced' | 'literal';
+export type ImageTextPolicy = 'none' | 'minimal' | 'allowed';
+
+export type GeneratedImagePlan = {
   prompt?: string;
+  mood?: string;
+  style?: string;
+  keySubjects?: string[];
+  mustAvoid?: string[];
+  textInImage?: ImageTextPolicy;
+  literalness?: ImageLiteralness;
 };
 
 type JsonImageDecision = {
   shouldGenerate?: boolean;
-  prompt?: string;
+  image?: GeneratedImagePlan;
 };
 
-type JsonReplyImagePrompt = {
-  prompt?: string;
+type JsonScheduledPost = {
+  caption?: string;
+  image?: GeneratedImagePlan;
 };
 
 const REACTION_TRAILER_RE = /\n?\s*\[\[reaction:([^\]\r\n]{0,32})\]\]\s*$/u;
+const MAX_RECENT_REACTION_EMOJIS = 8;
+const recentReactionEmojisByGroup = new Map<string, string[]>();
+const REACTION_EMOJI_MOOD_GUIDE = [
+  'mocking laughter / absurdity: 😂 🤣 😹 😭',
+  'smug / dismissive / bored superiority: 😏 🙄 😌 🤭 🫤',
+  'cringe / awkward / second-hand pain: 😬 🫠 😵‍💫 🥴',
+  'watching / suspicious / skeptical: 👀 🤨 🧐 🧪',
+  'hype / applause / clean win: 🔥 👏 ⚡ 😎 🫡',
+  'chaos / menace / cursed energy: 😈 🤡 💀 ☠️ 🚨',
+  'robot / brain / tech / scheming: 🤖 🧠 ⚙️ 🛰️ 🔌',
+  'collapse / disaster / trainwreck: 🫥 📉 💥 🪦',
+  'popcorn / spectator drama: 🍿',
+  'money / greed / market vibes: 💸 📈',
+];
 
 function isClaude46Model(model: string): boolean {
   return /\bclaude-(?:sonnet|opus)-4-6\b/.test(model);
@@ -179,6 +205,62 @@ function extractTextResponse(response: { content: Array<{ type: string; text?: s
   return textParts.join('');
 }
 
+function getGroupSystemPrompt(groupConfig: GroupConfig): string {
+  return groupConfig.chatbot?.systemPrompt?.trim()
+    || 'You are a helpful assistant in a WhatsApp group chat. Be concise and friendly.';
+}
+
+function formatHistoryWindow(messages: readonly ChatMessage[]): string {
+  if (messages.length === 0) {
+    return '[no recent discussion]';
+  }
+
+  return messages.map((msg) => {
+    const timestamp = new Date(msg.timestamp ?? Date.now()).toISOString();
+    const speaker = msg.fromBot ? `${msg.senderName || 'Bot'} (bot)` : msg.senderName;
+    const parts: string[] = [];
+    if (msg.imageData) {
+      parts.push('[image]');
+    }
+    if (msg.text?.trim()) {
+      parts.push(msg.text.trim());
+    }
+    if (parts.length === 0) {
+      parts.push('[no text]');
+    }
+    return `[${timestamp}] ${speaker}: ${parts.join(' ')}`;
+  }).join('\n');
+}
+
+function buildReactionVarietyInstruction(groupJid: string): string {
+  const recent = recentReactionEmojisByGroup.get(groupJid) ?? [];
+  const lines = [
+    'Reaction emoji guidance:',
+    `- Prefer fitting the mood using these buckets: ${REACTION_EMOJI_MOOD_GUIDE.join('; ')}.`,
+    '- Choose one emoji that feels fresh for the current tone, semantic content, and persona.',
+    '- Do not default to laughing faces when a smug, awkward, skeptical, robotic, market, chaos, or popcorn emoji fits better.',
+    '- Prefer non-face emoji when they reflect the subject better, for example AI/robotics -> 🤖 🧠 ⚙️, market/money -> 📈 📉 💸, drama -> 🍿 🚨, collapse -> 💀 🪦 💥.',
+    '- The emoji should react to what is being said, not just signal generic positivity or laughter.',
+    '- Match the persona energy of the bot. If the persona is bored, superior, technical, or menacing, a smug or machine-like emoji is often better than 😂.',
+    '- Use 😂 or 🤣 only when the situation is genuinely laugh-out-loud absurd, not as the default for all jokes.',
+  ];
+  if (recent.length > 0) {
+    lines.push(`- Avoid reusing these recent reaction emojis unless absolutely necessary: ${recent.join(' ')}`);
+  }
+  return lines.join('\n');
+}
+
+export function recordRecentReactionEmoji(groupJid: string, emoji: string): void {
+  const trimmed = emoji.trim();
+  if (!trimmed) return;
+  const recent = recentReactionEmojisByGroup.get(groupJid) ?? [];
+  recent.push(trimmed);
+  if (recent.length > MAX_RECENT_REACTION_EMOJIS) {
+    recent.splice(0, recent.length - MAX_RECENT_REACTION_EMOJIS);
+  }
+  recentReactionEmojisByGroup.set(groupJid, recent);
+}
+
 function parseReactionEmoji(rawValue: string | undefined): string | undefined {
   const value = rawValue?.trim();
   if (!value || /^none$/iu.test(value)) return undefined;
@@ -215,8 +297,7 @@ function buildSystemPrompt(
     dynamicStyleInstruction?: string;
   } = {},
 ): string {
-  const chatbot = groupConfig.chatbot!;
-  const blocks = [chatbot.systemPrompt.trim(), getProfilesPrompt(groupJid).trim()];
+  const blocks = [getGroupSystemPrompt(groupConfig), getProfilesPrompt(groupJid).trim()];
 
   if (options.includeDynamicStyle !== false) {
     blocks.push(options.dynamicStyleInstruction ?? buildDynamicStyleInstruction(groupConfig).instruction);
@@ -246,6 +327,43 @@ function parseJsonResponse<T>(text: string): T | null {
   } catch {
     return null;
   }
+}
+
+function normalizeStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, 8);
+  return items.length > 0 ? items : undefined;
+}
+
+function parseImagePlan(value: unknown, defaults?: {
+  literalness?: ImageLiteralness;
+  textInImage?: ImageTextPolicy;
+}): GeneratedImagePlan | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const raw = value as Record<string, unknown>;
+  const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : '';
+  if (!prompt) return null;
+
+  const literalness = raw.literalness === 'vibe' || raw.literalness === 'balanced' || raw.literalness === 'literal'
+    ? raw.literalness
+    : (defaults?.literalness ?? 'balanced');
+  const textInImage = raw.textInImage === 'none' || raw.textInImage === 'minimal' || raw.textInImage === 'allowed'
+    ? raw.textInImage
+    : (defaults?.textInImage ?? 'none');
+
+  return {
+    prompt,
+    mood: typeof raw.mood === 'string' ? raw.mood.trim() || undefined : undefined,
+    style: typeof raw.style === 'string' ? raw.style.trim() || undefined : undefined,
+    keySubjects: normalizeStringList(raw.keySubjects),
+    mustAvoid: normalizeStringList(raw.mustAvoid),
+    textInImage,
+    literalness,
+  };
 }
 
 async function runPlanningPrompt(
@@ -332,6 +450,7 @@ export async function generateResponse(
       'If you choose an emoji, output exactly one emoji and no explanation.',
       'Do not mention the trailer or explain your reaction choice.',
     ].join('\n'),
+    buildReactionVarietyInstruction(groupJid),
   ]);
   const systemPrompt = buildSystemPrompt(
     groupConfig,
@@ -373,7 +492,8 @@ export async function generateResponse(
   console.log(`[llm] Request for "${groupLabel}":`);
   console.log(`[llm]   model=${params.model}, max_tokens=${params.max_tokens}`);
   console.log(`[llm]   hotness=${chatbot.hotness ?? 35}, sampledTone=${dynamicStyle.band} (${dynamicStyle.intensity.toFixed(2)})`);
-  console.log(`[llm]   system="${chatbot.systemPrompt.substring(0, 120)}${chatbot.systemPrompt.length > 120 ? '...' : ''}"`);
+  const systemPreview = getGroupSystemPrompt(groupConfig);
+  console.log(`[llm]   system="${systemPreview.substring(0, 120)}${systemPreview.length > 120 ? '...' : ''}"`);
   console.log(`[llm]   messages=${messages.length}, thinking=${chatbot.enableThinking ?? false}${params.output_config ? ` (${JSON.stringify(params.output_config)})` : ''}, webSearch=${chatbot.enableWebSearch ?? false}${chatbot.enableWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
   if (params.tools) {
     console.log(`[llm]   tools=${JSON.stringify(params.tools)}`);
@@ -451,7 +571,7 @@ export async function generateImagePromptForDirectRequest(
   groupJid: string,
   latestUserText: string,
   replyText: string,
-): Promise<string | null> {
+): Promise<GeneratedImagePlan | null> {
   const responseText = await runPlanningPrompt(
     config,
     groupConfig,
@@ -459,9 +579,12 @@ export async function generateImagePromptForDirectRequest(
     [
       'You are preparing an image-generation prompt for a companion image.',
       'The user directly asked for an image.',
-      'Return JSON only with the shape {"prompt":"..."}',
+      'Return JSON only with the shape {"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}',
       'Write a single self-contained prompt suitable for a modern text-to-image model.',
       'Carry over the conversation context, the bot persona, and the tone of the reply.',
+      'Use literalness="balanced" by default. Only use literalness="literal" when the user clearly wants exact depiction. Use literalness="vibe" when mood matters more than exact scene details.',
+      'Default to textInImage="none" unless the user explicitly asked for readable text, a poster, a sign, a screenshot, a headline, or typography as part of the image.',
+      'Prefer images that represent the mood, characters, and scene rather than a wall of written content.',
       'Prefer an image prompt in English unless the user explicitly asked for another language in the image.',
       'Avoid asking for text overlays unless the user explicitly requested them.',
       'The bot reply itself must stay as plain text only, never markdown image syntax or image URLs.',
@@ -476,9 +599,8 @@ export async function generateImagePromptForDirectRequest(
     220,
   );
 
-  const parsed = parseJsonResponse<JsonImagePrompt>(responseText);
-  const prompt = parsed?.prompt?.trim();
-  return prompt || null;
+  const parsed = parseJsonResponse<GeneratedImagePlan>(responseText);
+  return parseImagePlan(parsed, { literalness: 'balanced', textInImage: 'none' });
 }
 
 export async function decideImageForReply(
@@ -487,7 +609,7 @@ export async function decideImageForReply(
   groupJid: string,
   latestUserText: string,
   replyText: string,
-): Promise<{ shouldGenerate: boolean; prompt: string | null }> {
+): Promise<{ shouldGenerate: boolean; image: GeneratedImagePlan | null }> {
   const responseText = await runPlanningPrompt(
     config,
     groupConfig,
@@ -496,11 +618,13 @@ export async function decideImageForReply(
       'You are deciding whether the bot should attach an image with its next reply.',
       'Be conservative. Most replies should stay text-only.',
       'Only choose an image when it clearly adds humor, atmosphere, or clarity to the reply.',
-      'Return JSON only with the shape {"shouldGenerate":true|false,"prompt":"..."}',
-      'If shouldGenerate is false, leave prompt as an empty string.',
-      'If shouldGenerate is true, write a self-contained image prompt that reflects the bot persona and the exact reply.',
+      'Return JSON only with the shape {"shouldGenerate":true|false,"image":{"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}}',
+      'If shouldGenerate is false, set image to null or an empty prompt.',
+      'If shouldGenerate is true, write a self-contained image prompt that reflects the bot persona and the reply.',
+      'Default to literalness="balanced". Use literalness="vibe" when the image should mainly convey mood, body language, tension, or comedic atmosphere rather than literal sentence content.',
+      'Default to textInImage="none". Only allow readable text if the conversation explicitly calls for it.',
       'Prefer an image prompt in English unless the user explicitly asked for another language in the image.',
-      'Avoid text overlays unless the conversation explicitly calls for them.',
+      'Avoid text overlays, signs, posters, chat bubbles, captions, screenshots, or headline-style compositions unless explicitly requested.',
       'The bot reply must remain plain text, never markdown image syntax or external image URLs.',
       'Do not include bracketed image descriptions such as [Imagem: ...], [Image: ...], or similar prompt annotations in the bot reply.',
     ].join('\n'),
@@ -513,10 +637,10 @@ export async function decideImageForReply(
   );
 
   const parsed = parseJsonResponse<JsonImageDecision>(responseText);
-  const prompt = parsed?.prompt?.trim() || null;
+  const image = parseImagePlan(parsed?.image, { literalness: 'balanced', textInImage: 'none' });
   return {
-    shouldGenerate: parsed?.shouldGenerate === true && !!prompt,
-    prompt,
+    shouldGenerate: parsed?.shouldGenerate === true && !!image,
+    image,
   };
 }
 
@@ -527,7 +651,7 @@ export async function generateImagePromptForReply(
   latestUserText: string,
   replyText: string,
   reason: string,
-): Promise<string | null> {
+): Promise<GeneratedImagePlan | null> {
   const responseText = await runPlanningPrompt(
     config,
     groupConfig,
@@ -535,11 +659,13 @@ export async function generateImagePromptForReply(
     [
       'You are preparing a companion image prompt for the bot reply.',
       `Reason for adding an image: ${reason}.`,
-      'Return JSON only with the shape {"prompt":"..."}',
+      'Return JSON only with the shape {"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}',
       'Write a single self-contained image prompt suitable for a modern text-to-image model.',
       'Reflect the same persona, joke, atmosphere, and subject matter as the reply.',
+      'Default to literalness="balanced". Use literalness="vibe" when the image should mainly capture mood, tension, or the comedic setup rather than literal wording.',
+      'Default to textInImage="none". Do not ask for readable text unless the conversation explicitly requested it.',
       'Prefer an image prompt in English unless the user explicitly asked for another language in the image.',
-      'Avoid text overlays unless the conversation explicitly asked for them.',
+      'Avoid text overlays, posters, signs, labels, subtitles, chat bubbles, or screenshot-style layouts unless explicitly requested.',
       'The bot reply itself must remain plain text only, never markdown image syntax or image URLs.',
       'Do not include bracketed image descriptions such as [Imagem: ...], [Image: ...], or similar prompt annotations in the bot reply.',
       'If you cannot derive a good image, return {"prompt":""}.',
@@ -552,7 +678,96 @@ export async function generateImagePromptForReply(
     220,
   );
 
-  const parsed = parseJsonResponse<JsonReplyImagePrompt>(responseText);
-  const prompt = parsed?.prompt?.trim();
-  return prompt || null;
+  const parsed = parseJsonResponse<GeneratedImagePlan>(responseText);
+  return parseImagePlan(parsed, { literalness: 'balanced', textInImage: 'none' });
+}
+
+export async function generateScheduledImagePost(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  job: ScheduledPostJobConfig,
+  historyWindow: readonly ChatMessage[],
+  latestNewsDigest?: LatestNewsDigest | null,
+): Promise<{ caption: string; image: GeneratedImagePlan | null }> {
+  const anthropic = getClient(config.global.anthropicApiKey);
+  const systemPrompt = buildSystemPrompt(
+    groupConfig,
+    groupJid,
+    [
+      'You are generating a standalone scheduled WhatsApp group post.',
+      'Return JSON only with the shape {"caption":"...","image":{"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}}',
+      'The caption should read like a natural group post, not a direct reply.',
+      'Write the caption fully in the bot persona and voice defined by the system prompt and group profile. Do not switch into neutral newsletter, analyst, or assistant tone.',
+      'The image plan should be a self-contained visual brief that reflects the caption.',
+      'For scheduled posts, prefer images that capture the vibe, atmosphere, and relationships of the caption rather than literalizing every sentence.',
+      'For scheduled posts, default to literalness="vibe" unless the task prompt clearly demands a more exact depiction.',
+      'For scheduled posts, default to textInImage="none". Avoid readable text, signs, posters, headlines, newspaper layouts, captions, subtitles, or UI unless the task explicitly asks for them.',
+      'Use recent group discussion if relevant. If the group has little recent discussion, rely more on the scheduled task prompt.',
+      'If a news digest summary is provided, treat it as external context you can weave into the post when relevant to the task prompt.',
+      'If web search is enabled, use it only when it materially improves the post.',
+      'Do not add markdown image syntax, URLs, or explanatory notes.',
+      'If no good image is appropriate, still provide a sensible imagePrompt that matches the caption.',
+    ],
+    { includeDynamicStyle: false },
+  );
+
+  const params: Record<string, any> = {
+    model: config.global.claudeModel,
+    max_tokens: Math.max(config.global.claudeMaxTokens, 1400),
+    system: systemPrompt,
+    messages: [{
+      role: 'user',
+      content: [
+        `Scheduled task label: ${job.label ?? 'scheduled-post'}`,
+        `Scheduled task prompt:\n${job.prompt}`,
+        `Lookback window (hours): ${job.lookbackHours ?? 24}`,
+        `Recent group discussion:\n${formatHistoryWindow(historyWindow)}`,
+        latestNewsDigest
+          ? [
+              `Latest external news digest file: ${latestNewsDigest.path}`,
+              `Latest external news digest time: ${new Date(latestNewsDigest.modifiedAt).toISOString()}`,
+              `Latest external news digest summary:\n${latestNewsDigest.content}`,
+            ].join('\n')
+          : 'Latest external news digest summary:\n[none available]',
+        'Return the JSON now.',
+      ].join('\n\n'),
+    }],
+  };
+
+  if (job.enableWebSearch) {
+    params.tools = [{
+      type: 'web_search_20250305',
+      name: 'web_search',
+      max_uses: job.maxSearches ?? 3,
+    }];
+  }
+
+  const groupLabel = groupConfig.name ?? groupJid;
+  console.log(
+    `[llm] Scheduled post request for "${groupLabel}" / "${job.label ?? 'scheduled-post'}": ` +
+    `webSearch=${job.enableWebSearch ?? false} historyMessages=${historyWindow.length} ` +
+    `newsDigest=${latestNewsDigest ? latestNewsDigest.path : 'none'}`,
+  );
+
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('Scheduled post LLM request timed out after 2 minutes')), 120_000),
+  );
+  const response = await Promise.race([
+    anthropic.messages.create(params as any),
+    timeout,
+  ]);
+
+  const responseText = extractTextResponse(response).trim();
+  const parsed = parseJsonResponse<JsonScheduledPost>(responseText);
+  const caption = parsed?.caption?.trim() || '';
+  const image = parseImagePlan(parsed?.image, { literalness: 'vibe', textInImage: 'none' });
+  if (!caption) {
+    throw new Error(`Scheduled post generation returned invalid JSON or empty caption: ${responseText.slice(0, 400)}`);
+  }
+
+  return {
+    caption,
+    image,
+  };
 }
