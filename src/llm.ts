@@ -1,7 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { AppConfig, GroupConfig, ScheduledPostJobConfig } from './config.js';
+import type { AppConfig, ChatModelConfig, GroupConfig, ScheduledPostJobConfig } from './config.js';
+import { resolveGroupChatModel } from './config.js';
 import type { ChatMessage } from './chat-history.js';
-import { getRecentBotMessages, toAnthropicMessages } from './chat-history.js';
+import { getRecentBotMessages, toAnthropicMessages, toGoogleContents } from './chat-history.js';
 import { getProfilesPrompt } from './group-profiles.js';
 import type { LatestNewsDigest } from './news.js';
 
@@ -41,7 +42,30 @@ type JsonScheduledPost = {
   image?: GeneratedImagePlan;
 };
 
+type GoogleGenerateContentResponse = {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
+    };
+    finishReason?: string;
+    groundingMetadata?: unknown;
+  }>;
+};
+
 const REACTION_TRAILER_RE = /\n?\s*\[\[reaction:([^\]\r\n]{0,32})\]\]\s*$/u;
+const GOOGLE_REASONING_LEAK_PATTERNS = [
+  /^\s*[*-]\s*User:/imu,
+  /\bOption\s+\d+\b/iu,
+  /\bDraft:/iu,
+  /\bCharacter count\b/iu,
+  /\bTranslation:\b/iu,
+  /\bPersona:\b/iu,
+  /\bLet's go with\b/iu,
+  /\bAlternative Draft\b/iu,
+  /\bNeed to\b/iu,
+];
 const MAX_RECENT_REACTION_EMOJIS = 8;
 const recentReactionEmojisByGroup = new Map<string, string[]>();
 const REACTION_EMOJI_MOOD_GUIDE = [
@@ -207,6 +231,14 @@ function extractTextResponse(response: { content: Array<{ type: string; text?: s
   return textParts.join('');
 }
 
+function extractGoogleTextResponse(response: GoogleGenerateContentResponse): string {
+  const textParts = (response.candidates ?? [])
+    .flatMap((candidate) => candidate.content?.parts ?? [])
+    .map((part) => part.text?.trim() ?? '')
+    .filter(Boolean);
+  return textParts[textParts.length - 1] ?? '';
+}
+
 function getGroupSystemPrompt(groupConfig: GroupConfig): string {
   return groupConfig.chatbot?.systemPrompt?.trim()
     || 'You are a helpful assistant in a WhatsApp group chat. Be concise and friendly.';
@@ -250,6 +282,364 @@ function buildReactionVarietyInstruction(groupJid: string): string {
     lines.push(`- Avoid reusing these recent reaction emojis unless absolutely necessary: ${recent.join(' ')}`);
   }
   return lines.join('\n');
+}
+
+function buildReplyPromptBlocks(groupJid: string, expectsImage: boolean): string[] {
+  return (expectsImage
+    ? [
+        [
+          'The user explicitly asked for an image and you can accompany this reply with one.',
+          'Write a short caption or companion line that works naturally alongside an image.',
+          'Do not claim you cannot generate images.',
+          'Do not output markdown image syntax, image URLs, or external image links.',
+          'Never use ![alt](url) formatting.',
+          'Do not include bracketed image descriptions such as [Imagem: ...], [Image: ...], or similar prompt annotations.',
+        ].join('\n'),
+      ]
+    : []
+  ).concat([
+    [
+      'Return only the final user-visible reply.',
+      'Never reveal reasoning, analysis, notes, options, drafts, translations, constraints, character counts, or self-evaluation.',
+      'Never include labels such as "User:", "Option 1", "Draft:", "Persona:", "Translation:", or "Let\'s go with".',
+      'Do not narrate your process or explain why you chose the answer.',
+      'After the visible reply, append exactly one final trailer in this format: [[reaction:EMOJI]] or [[reaction:none]].',
+      'The trailer must be the last thing in the final text.',
+      'For this testing phase, bias toward using an emoji whenever the message or your reply has any noticeable snark, roast, teasing, hype, disbelief, suspense, applause, or playful energy.',
+      'Use [[reaction:none]] only for clearly plain, mild, or purely informational triggers with little emotional tone.',
+      'If your visible reply contains even mild sarcasm, mockery, or playful dismissal, prefer using an emoji instead of none.',
+      'If you choose an emoji, output exactly one emoji and no explanation.',
+      'Do not mention the trailer or explain your reaction choice.',
+    ].join('\n'),
+    buildReactionVarietyInstruction(groupJid),
+  ]);
+}
+
+function looksLikeGoogleReasoningLeak(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const hits = GOOGLE_REASONING_LEAK_PATTERNS.filter((pattern) => pattern.test(trimmed)).length;
+  return hits >= 2 || (hits >= 1 && trimmed.length >= 500);
+}
+
+function extractLikelyFinalReplyFromLeak(text: string, reactionEmoji?: string): GeneratedReply | null {
+  const withoutTrailer = text.replace(REACTION_TRAILER_RE, '').trim();
+  const quotedCandidates = [...withoutTrailer.matchAll(/["“]([^"”\n]{20,500})["”]/gu)]
+    .map((match) => match[1]?.trim() ?? '')
+    .filter((candidate) =>
+      candidate
+      && !GOOGLE_REASONING_LEAK_PATTERNS.some((pattern) => pattern.test(candidate))
+      && !/\[\[reaction:/iu.test(candidate));
+
+  if (quotedCandidates.length > 0) {
+    return {
+      text: quotedCandidates[quotedCandidates.length - 1]!,
+      ...(reactionEmoji ? { reactionEmoji } : {}),
+    };
+  }
+
+  const lineCandidates = withoutTrailer
+    .split(/\n+/u)
+    .map((line) => line.trim())
+    .filter((line) =>
+      line.length >= 20
+      && !GOOGLE_REASONING_LEAK_PATTERNS.some((pattern) => pattern.test(line))
+      && !/^\*+\s*/u.test(line)
+      && !/\[\[reaction:/iu.test(line));
+
+  if (lineCandidates.length > 0) {
+    return {
+      text: lineCandidates[lineCandidates.length - 1]!,
+      ...(reactionEmoji ? { reactionEmoji } : {}),
+    };
+  }
+
+  return null;
+}
+
+function buildSyntheticFinalUserPrompt(triggerSenderName: string, latestUserText: string): string {
+  return [
+    `Respond now to this specific message from [${triggerSenderName}].`,
+    `Target message:\n[${triggerSenderName}]: ${latestUserText}`,
+    'Use the full conversation above as context, including any newer assistant replies, but make this target message the one you answer now.',
+  ].join('\n\n');
+}
+
+function buildAnthropicReplyMessages(groupJid: string, triggerSenderName: string, latestUserText?: string): any[] {
+  const historyMessages = toAnthropicMessages(groupJid);
+  if (!latestUserText) {
+    return historyMessages;
+  }
+  return [
+    ...historyMessages,
+    {
+      role: 'user',
+      content: buildSyntheticFinalUserPrompt(triggerSenderName, latestUserText),
+    },
+  ];
+}
+
+function buildGoogleReplyContents(groupJid: string, triggerSenderName: string, latestUserText?: string): Array<Record<string, unknown>> {
+  const contents = toGoogleContents(groupJid).map((entry) => ({ role: entry.role, parts: entry.parts }));
+  if (!latestUserText) {
+    return contents;
+  }
+  return [
+    ...contents,
+    {
+      role: 'user',
+      parts: [{ text: buildSyntheticFinalUserPrompt(triggerSenderName, latestUserText) }],
+    },
+  ];
+}
+
+async function generateAnthropicReply(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  chatModel: ChatModelConfig,
+  systemPrompt: string,
+  latestUserText: string | undefined,
+  triggerSenderName: string,
+  dynamicStyle: { intensity: number; baseline: number; band: string; instruction: string },
+): Promise<GeneratedReply> {
+  const anthropic = getClient(config.global.anthropicApiKey);
+  const chatbot = groupConfig.chatbot!;
+  const messages = buildAnthropicReplyMessages(groupJid, triggerSenderName, latestUserText);
+
+  if (messages.length === 0) {
+    return { text: "I don't have any context yet. How can I help you?" };
+  }
+
+  const params: Record<string, any> = {
+    model: chatModel.apiModel,
+    max_tokens: config.global.chatMaxOutputTokens,
+    system: systemPrompt,
+    messages,
+  };
+
+  if (chatbot.enableThinking && chatModel.supportsThinking) {
+    const budget = chatbot.thinkingBudget ?? 2000;
+    if (isClaude46Model(chatModel.apiModel)) {
+      params.thinking = { type: 'adaptive' };
+      params.output_config = {
+        effort: getAdaptiveThinkingEffort(chatbot.thinkingBudget),
+      };
+    } else {
+      params.thinking = { type: 'enabled', budget_tokens: budget };
+      params.max_tokens = config.global.chatMaxOutputTokens + budget;
+    }
+  }
+
+  if (chatbot.enableWebSearch && chatModel.supportsWebSearch) {
+    params.tools = [{
+      type: 'web_search_20250305',
+      name: 'web_search',
+      max_uses: chatbot.maxSearches ?? 3,
+    }];
+  }
+
+  const groupLabel = groupConfig.name ?? groupJid;
+  console.log(`[llm] Request for "${groupLabel}":`);
+  console.log(`[llm]   provider=anthropic model=${params.model}, max_tokens=${params.max_tokens}, modelId=${chatModel.id}`);
+  console.log(`[llm]   hotness=${chatbot.hotness ?? 35}, sampledTone=${dynamicStyle.band} (${dynamicStyle.intensity.toFixed(2)})`);
+  const systemPreview = getGroupSystemPrompt(groupConfig);
+  console.log(`[llm]   system="${systemPreview.substring(0, 120)}${systemPreview.length > 120 ? '...' : ''}"`);
+  console.log(`[llm]   messages=${messages.length}, syntheticFinalUser=${latestUserText ? 'yes' : 'no'}, thinking=${chatbot.enableThinking && chatModel.supportsThinking}${params.output_config ? ` (${JSON.stringify(params.output_config)})` : ''}, webSearch=${chatbot.enableWebSearch && chatModel.supportsWebSearch}${chatbot.enableWebSearch && chatModel.supportsWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
+  if (params.tools) {
+    console.log(`[llm]   tools=${JSON.stringify(params.tools)}`);
+  }
+
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('LLM request timed out after 2 minutes')), 120_000),
+  );
+  const response = await Promise.race([
+    anthropic.messages.create(params as any),
+    timeout,
+  ]);
+
+  console.log(`[llm] Response for "${groupLabel}": stop_reason=${response.stop_reason}, blocks=${response.content.length}`);
+  for (const block of response.content) {
+    if (block.type === 'text') {
+      console.log(`[llm]   [text] ${block.text.substring(0, 150)}${block.text.length > 150 ? '...' : ''}`);
+    } else if (block.type === 'web_search_tool_result' || block.type === 'server_tool_use') {
+      console.log(`[llm]   [${block.type}] ${JSON.stringify(block).substring(0, 200)}...`);
+    } else {
+      console.log(`[llm]   [${block.type}]`);
+    }
+  }
+
+  const reply = extractReplyAndReaction(extractTextResponse(response));
+  if (reply.text) {
+    console.log(`[llm] Parsed reaction hint for "${groupLabel}": ${reply.reactionEmoji ?? 'none'}`);
+    return reply;
+  }
+
+  return { text: '' };
+}
+
+async function generateGoogleReply(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  chatModel: ChatModelConfig,
+  systemPrompt: string,
+  latestUserText: string | undefined,
+  triggerSenderName: string,
+  dynamicStyle: { intensity: number; baseline: number; band: string; instruction: string },
+): Promise<GeneratedReply> {
+  const chatbot = groupConfig.chatbot!;
+  const contents = buildGoogleReplyContents(groupJid, triggerSenderName, latestUserText);
+
+  if (contents.length === 0) {
+    return { text: "I don't have any context yet. How can I help you?" };
+  }
+
+  const payload: Record<string, any> = {
+    system_instruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    contents,
+    generationConfig: {
+      responseMimeType: 'text/plain',
+      maxOutputTokens: config.global.chatMaxOutputTokens,
+    },
+  };
+
+  if (chatbot.enableThinking && chatModel.supportsThinkingConfig) {
+    payload.generationConfig.thinkingConfig = {
+      thinkingLevel: getAdaptiveThinkingEffort(chatbot.thinkingBudget),
+    };
+  }
+
+  if (chatbot.enableWebSearch && chatModel.supportsWebSearch) {
+    payload.tools = [{ google_search: {} }];
+  }
+
+  const groupLabel = groupConfig.name ?? groupJid;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(chatModel.apiModel)}:generateContent`;
+  console.log(`[llm] Request for "${groupLabel}":`);
+  console.log(`[llm]   provider=google model=${chatModel.apiModel}, maxOutputTokens=${payload.generationConfig.maxOutputTokens}, modelId=${chatModel.id}`);
+  console.log(`[llm]   hotness=${chatbot.hotness ?? 35}, sampledTone=${dynamicStyle.band} (${dynamicStyle.intensity.toFixed(2)})`);
+  const systemPreview = getGroupSystemPrompt(groupConfig);
+  console.log(`[llm]   system="${systemPreview.substring(0, 120)}${systemPreview.length > 120 ? '...' : ''}"`);
+  console.log(`[llm]   messages=${contents.length}, syntheticFinalUser=${latestUserText ? 'yes' : 'no'}, thinking=${chatbot.enableThinking && chatModel.supportsThinkingConfig}, webSearch=${chatbot.enableWebSearch && chatModel.supportsWebSearch}`);
+  if (payload.tools) {
+    console.log(`[llm]   tools=${JSON.stringify(payload.tools)}`);
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-goog-api-key': config.global.geminiApiKey ?? '',
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`Google model request failed (${response.status}): ${bodyText.slice(0, 500)}`);
+  }
+
+  const json = await response.json() as GoogleGenerateContentResponse;
+  console.log(`[llm] Response for "${groupLabel}": candidates=${json.candidates?.length ?? 0}`);
+  const rawText = extractGoogleTextResponse(json);
+  let reply = extractReplyAndReaction(rawText);
+  if (looksLikeGoogleReasoningLeak(reply.text)) {
+    console.warn(`[llm] Google model ${chatModel.apiModel} leaked reasoning-style text; attempting cleanup.`);
+    console.warn(`[llm] Google raw response preview for "${groupLabel}": ${rawText.slice(0, 800)}`);
+    try {
+      const cleaned = await cleanupGoogleReply(
+        config,
+        chatModel,
+        groupLabel,
+        latestUserText,
+        systemPrompt,
+        rawText,
+        reply.reactionEmoji,
+      );
+      if (cleaned.text && !looksLikeGoogleReasoningLeak(cleaned.text)) {
+        reply = cleaned;
+      } else {
+        const salvaged = extractLikelyFinalReplyFromLeak(rawText, reply.reactionEmoji);
+        if (salvaged?.text) {
+          console.warn(`[llm] Google reasoning leak for ${chatModel.apiModel} salvaged heuristically.`);
+          reply = salvaged;
+        }
+      }
+    } catch (error) {
+      console.error(`[llm] Failed to clean up Google reasoning leak for ${chatModel.apiModel}:`, error);
+      const salvaged = extractLikelyFinalReplyFromLeak(rawText, reply.reactionEmoji);
+      if (salvaged?.text) {
+        console.warn(`[llm] Google reasoning leak for ${chatModel.apiModel} salvaged heuristically after cleanup failure.`);
+        reply = salvaged;
+      }
+    }
+  }
+  if (reply.text) {
+    console.log(`[llm] Parsed reaction hint for "${groupLabel}": ${reply.reactionEmoji ?? 'none'}`);
+    return reply;
+  }
+
+  return { text: '' };
+}
+
+async function cleanupGoogleReply(
+  config: AppConfig,
+  chatModel: ChatModelConfig,
+  groupLabel: string,
+  latestUserText: string | undefined,
+  systemPrompt: string,
+  leakedText: string,
+  reactionEmoji?: string,
+): Promise<GeneratedReply> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(chatModel.apiModel)}:generateContent`;
+  const cleanupInstruction = [
+    'Rewrite the provided leaked scratchpad into one final user-visible reply only.',
+    'Do not include analysis, bullets, labels, options, drafts, translations, constraints, or commentary.',
+    'Keep the language, persona, and tone intended by the original answer.',
+    'Keep it under 400 characters.',
+    `Append exactly one final trailer: [[reaction:${reactionEmoji ?? 'none'}]]`,
+    'That trailer must be the last thing in the text.',
+  ].join('\n');
+
+  const payload: Record<string, any> = {
+    system_instruction: {
+      parts: [{ text: `${systemPrompt}\n\n${cleanupInstruction}` }],
+    },
+    contents: [{
+      role: 'user',
+      parts: [{
+        text: [
+          latestUserText ? `Original user message:\n${latestUserText}` : '',
+          `Leaked output to clean:\n${leakedText}`,
+          'Return the clean final reply now.',
+        ].filter(Boolean).join('\n\n'),
+      }],
+    }],
+    generationConfig: {
+      responseMimeType: 'text/plain',
+      maxOutputTokens: 220,
+    },
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-goog-api-key': config.global.geminiApiKey ?? '',
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`Google cleanup request failed (${response.status}): ${bodyText.slice(0, 500)}`);
+  }
+
+  const json = await response.json() as GoogleGenerateContentResponse;
+  return extractReplyAndReaction(extractGoogleTextResponse(json));
 }
 
 export function recordRecentReactionEmoji(groupJid: string, emoji: string): void {
@@ -480,54 +870,13 @@ export async function generateResponse(
   groupJid: string,
   options: ResponseGenerationOptions = {},
 ): Promise<GeneratedReply> {
-  const anthropic = getClient(config.global.anthropicApiKey);
-  const historyMessages = toAnthropicMessages(groupJid);
+  const groupLabel = groupConfig.name ?? groupJid;
   const latestUserText = options.latestUserText?.trim();
   const triggerSenderName = options.triggerSenderName?.trim() || 'User';
-  const messages = latestUserText
-    ? [
-        ...historyMessages,
-        {
-          role: 'user' as const,
-          content: [
-            `Respond now to this specific message from [${triggerSenderName}].`,
-            `Target message:\n[${triggerSenderName}]: ${latestUserText}`,
-            'Use the full conversation above as context, including any newer assistant replies, but make this target message the one you answer now.',
-          ].join('\n\n'),
-        },
-      ]
-    : historyMessages;
-
-  if (messages.length === 0) {
-    return { text: "I don't have any context yet. How can I help you?" };
-  }
-
   const chatbot = groupConfig.chatbot!;
+  const chatModel = resolveGroupChatModel(config.global, groupConfig);
   const dynamicStyle = buildDynamicStyleInstruction(groupConfig);
-  const promptBlocks = (options.expectsImage
-    ? [
-        [
-          'The user explicitly asked for an image and you can accompany this reply with one.',
-          'Write a short caption or companion line that works naturally alongside an image.',
-          'Do not claim you cannot generate images.',
-          'Do not output markdown image syntax, image URLs, or external image links.',
-          'Never use ![alt](url) formatting.',
-          'Do not include bracketed image descriptions such as [Imagem: ...], [Image: ...], or similar prompt annotations.',
-        ].join('\n'),
-      ]
-    : []
-  ).concat([
-    [
-      'After the visible reply, append exactly one final trailer in this format: [[reaction:EMOJI]] or [[reaction:none]].',
-      'The trailer must be the last thing in the final text.',
-      'For this testing phase, bias toward using an emoji whenever the message or your reply has any noticeable snark, roast, teasing, hype, disbelief, suspense, applause, or playful energy.',
-      'Use [[reaction:none]] only for clearly plain, mild, or purely informational triggers with little emotional tone.',
-      'If your visible reply contains even mild sarcasm, mockery, or playful dismissal, prefer using an emoji instead of none.',
-      'If you choose an emoji, output exactly one emoji and no explanation.',
-      'Do not mention the trailer or explain your reaction choice.',
-    ].join('\n'),
-    buildReactionVarietyInstruction(groupJid),
-  ]);
+  const promptBlocks = buildReplyPromptBlocks(groupJid, options.expectsImage === true);
   const systemPrompt = buildSystemPrompt(
     groupConfig,
     groupJid,
@@ -535,72 +884,33 @@ export async function generateResponse(
     { dynamicStyleInstruction: dynamicStyle.instruction },
   );
 
-  const params: Record<string, any> = {
-    model: config.global.claudeModel,
-    max_tokens: config.global.claudeMaxTokens,
-    system: systemPrompt,
-    messages,
-  };
-
-  if (chatbot.enableThinking) {
-    const budget = chatbot.thinkingBudget ?? 2000;
-    if (isClaude46Model(config.global.claudeModel)) {
-      params.thinking = { type: 'adaptive' };
-      params.output_config = {
-        effort: getAdaptiveThinkingEffort(chatbot.thinkingBudget),
-      };
-    } else {
-      params.thinking = { type: 'enabled', budget_tokens: budget };
-      // max_tokens must cover both thinking and text output
-      params.max_tokens = config.global.claudeMaxTokens + budget;
-    }
-  }
-
-  if (chatbot.enableWebSearch) {
-    params.tools = [{
-      type: 'web_search_20250305',
-      name: 'web_search',
-      max_uses: chatbot.maxSearches ?? 3,
-    }];
-  }
-
-  const groupLabel = groupConfig.name ?? groupJid;
-  console.log(`[llm] Request for "${groupLabel}":`);
-  console.log(`[llm]   model=${params.model}, max_tokens=${params.max_tokens}`);
-  console.log(`[llm]   hotness=${chatbot.hotness ?? 35}, sampledTone=${dynamicStyle.band} (${dynamicStyle.intensity.toFixed(2)})`);
-  const systemPreview = getGroupSystemPrompt(groupConfig);
-  console.log(`[llm]   system="${systemPreview.substring(0, 120)}${systemPreview.length > 120 ? '...' : ''}"`);
-  console.log(`[llm]   messages=${messages.length}, syntheticFinalUser=${latestUserText ? 'yes' : 'no'}, thinking=${chatbot.enableThinking ?? false}${params.output_config ? ` (${JSON.stringify(params.output_config)})` : ''}, webSearch=${chatbot.enableWebSearch ?? false}${chatbot.enableWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
-  if (params.tools) {
-    console.log(`[llm]   tools=${JSON.stringify(params.tools)}`);
-  }
-
-  const timeout = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error('LLM request timed out after 2 minutes')), 120_000)
-  );
-  const response = await Promise.race([
-    anthropic.messages.create(params as any),
-    timeout,
-  ]);
-
-  console.log(`[llm] Response for "${groupLabel}": stop_reason=${response.stop_reason}, blocks=${response.content.length}`);
-  for (const block of response.content) {
-    if (block.type === 'text') {
-      console.log(`[llm]   [text] ${block.text.substring(0, 150)}${block.text.length > 150 ? '...' : ''}`);
-    } else if (block.type === 'web_search_tool_result' || block.type === 'server_tool_use') {
-      console.log(`[llm]   [${block.type}] ${JSON.stringify(block).substring(0, 200)}...`);
-    } else {
-      console.log(`[llm]   [${block.type}]`);
-    }
-  }
-
-  const reply = extractReplyAndReaction(extractTextResponse(response));
+  const reply = chatModel.provider === 'anthropic'
+    ? await generateAnthropicReply(
+        config,
+        groupConfig,
+        groupJid,
+        chatModel,
+        systemPrompt,
+        latestUserText,
+        triggerSenderName,
+        dynamicStyle,
+      )
+    : await generateGoogleReply(
+        config,
+        groupConfig,
+        groupJid,
+        chatModel,
+        systemPrompt,
+        latestUserText,
+        triggerSenderName,
+        dynamicStyle,
+      );
   if (reply.text) {
-    console.log(`[llm] Parsed reaction hint for "${groupLabel}": ${reply.reactionEmoji ?? 'none'}`);
     return reply;
   }
 
   try {
+    const groupLabel = groupConfig.name ?? groupJid;
     const fallback = await generateShortPersonaLine(
       config,
       groupConfig,

@@ -1,6 +1,7 @@
 import { areJidsSameUser, downloadMediaMessage, type WAMessageKey, type WASocket } from '@whiskeysockets/baileys';
 import type { ConfigHolder, GroupConfig } from './config.js';
-import { addMessage, findMessageById, getNameToJidMap, updateMessageText } from './chat-history.js';
+import { getAllowedChatModels, isChatModelAvailable, resolveGroupChatModel, updateConfigFile } from './config.js';
+import { addMessage, findMessageById, getNameToJidMap, getRecentBotMessages, updateMessageText } from './chat-history.js';
 import { generateImage } from './gemini.js';
 import {
   decideImageForReply,
@@ -26,8 +27,10 @@ const GREETING_PREFIXES = [
 
 const IMAGE_REQUEST_TERMS = /\b(image|picture|pic|photo|meme|poster|illustration|drawing|art|avatar|wallpaper|imagem|foto|meme)\b/iu;
 const IMAGE_REQUEST_CUES = /\b(draw|generate|make|create|render|illustrate|paint|show|send|post|desenha|gera|cria|faz|manda|posta|mostra|ilustra|can you|could you|please|pls|quero|queria|pode)\b/iu;
+const MODEL_COMMAND_RE = /(?:^|[\s,!.?:;_-])\/model(?:\s+([^\s]+))?\s*$/iu;
 const AUTO_IMAGE_LONG_REPLY_THRESHOLD = 260;
 const AUTO_IMAGE_COOLDOWN_MS = 60_000;
+const AUTO_IMAGE_BOT_REPLY_GAP = 2;
 
 function parseBotAliases(botName: string): string[] {
   const aliases = botName
@@ -176,6 +179,11 @@ function getImageCooldownRemainingMs(groupJid: string): number {
   return Math.max(0, AUTO_IMAGE_COOLDOWN_MS - (Date.now() - state.lastImageSentAt));
 }
 
+function hasRecentBotImageReply(groupJid: string): boolean {
+  const recentBotMessages = getRecentBotMessages(groupJid, AUTO_IMAGE_BOT_REPLY_GAP);
+  return recentBotMessages.some((message) => !!message.imageData);
+}
+
 function isMessageFromBot(
   sock: WASocket,
   msg: { key: { fromMe?: boolean | null; participant?: string | null; remoteJid?: string | null } },
@@ -243,6 +251,81 @@ function sanitizeExplicitImageFallbackText(text: string): string {
     return sentenceMatch[1].trim();
   }
   return `${firstSegment.slice(0, 217).trimEnd()}...`;
+}
+
+function parseModelCommand(text: string): { command: 'list' | 'set'; modelId?: string } | null {
+  const match = text.match(MODEL_COMMAND_RE);
+  if (!match) return null;
+  const modelId = match[1]?.trim();
+  return modelId ? { command: 'set', modelId } : { command: 'list' };
+}
+
+function formatModelList(groupConfig: GroupConfig, configHolder: ConfigHolder): string {
+  const allowedModels = getAllowedChatModels(configHolder.current.global, groupConfig)
+    .filter((model) => isChatModelAvailable(configHolder.current.global, model));
+  const activeModel = resolveGroupChatModel(configHolder.current.global, groupConfig);
+  const defaultModelId = groupConfig.chatbot?.defaultModelId ?? activeModel.id;
+
+  if (allowedModels.length === 0) {
+    return 'Nenhum modelo está autorizado para este grupo.';
+  }
+
+  const lines = ['Modelos disponíveis neste grupo:'];
+  for (const model of allowedModels) {
+    const markers = [
+      ...(model.id === activeModel.id ? ['ativo'] : []),
+      ...(model.id === defaultModelId ? ['default'] : []),
+    ];
+    lines.push(`- ${model.id} — ${model.label}${markers.length > 0 ? ` — ${markers.join(', ')}` : ''}`);
+  }
+  lines.push('Usa `/model <id>` para mudar.');
+  return lines.join('\n');
+}
+
+async function sendPlainReply(remoteJid: string, text: string, quoted?: any): Promise<void> {
+  await waitForConnectionWithTimeout(30_000);
+  const sendSock = getSocket();
+  await sendSock.sendMessage(remoteJid, { text }, quoted ? { quoted } : undefined);
+}
+
+async function handleModelCommand(
+  configHolder: ConfigHolder,
+  groupConfig: GroupConfig,
+  remoteJid: string,
+  commandText: string,
+  quoted?: any,
+): Promise<void> {
+  const command = parseModelCommand(commandText);
+  if (!command) return;
+
+  if (command.command === 'list') {
+    await sendPlainReply(remoteJid, formatModelList(groupConfig, configHolder), quoted);
+    return;
+  }
+
+  const requestedId = command.modelId ?? '';
+  const allowedModels = getAllowedChatModels(configHolder.current.global, groupConfig)
+    .filter((model) => isChatModelAvailable(configHolder.current.global, model));
+  const targetModel = allowedModels.find((model) => model.id.toLowerCase() === requestedId.toLowerCase());
+
+  if (!targetModel) {
+    await sendPlainReply(
+      remoteJid,
+      `Modelo inválido ou não permitido: ${requestedId}\n\n${formatModelList(groupConfig, configHolder)}`,
+      quoted,
+    );
+    return;
+  }
+
+  updateConfigFile(configHolder.path, configHolder, (raw) => {
+    const groups: any[] = raw.groups ?? [];
+    const group = groups.find((entry: any) => entry.jid === remoteJid);
+    if (!group) throw new Error('Group not found in config file.');
+    if (!group.chatbot) group.chatbot = {};
+    group.chatbot.activeModelId = targetModel.id;
+  });
+
+  await sendPlainReply(remoteJid, `Modelo ativo: ${targetModel.id} — ${targetModel.label}`, quoted);
 }
 
 async function sendGeneratedReply(
@@ -322,8 +405,10 @@ async function sendGeneratedReply(
         }
       } else if (!explicitImageRequest && canGenerateAutoImages) {
         const cooldownRemainingMs = getImageCooldownRemainingMs(remoteJid);
+        const recentBotImageReply = hasRecentBotImageReply(remoteJid);
         const shouldForceLongReplyImage = responseText.length >= AUTO_IMAGE_LONG_REPLY_THRESHOLD
-          && cooldownRemainingMs === 0;
+          && cooldownRemainingMs === 0
+          && !recentBotImageReply;
 
         if (shouldForceLongReplyImage) {
           const imagePlan = await generateImagePromptForReply(
@@ -345,6 +430,8 @@ async function sendGeneratedReply(
           } : undefined;
           imageReason = `long reply heuristic (${responseText.length} chars)`;
           console.log(`[chat] Auto image forced for ${remoteJid}: long reply (${responseText.length} chars), cooldown clear`);
+        } else if (recentBotImageReply) {
+          console.log(`[chat] Auto image skipped for ${remoteJid}: bot already sent an image within the last ${AUTO_IMAGE_BOT_REPLY_GAP} bot replies`);
         } else if (cooldownRemainingMs > 0) {
           console.log(`[chat] Auto image skipped for ${remoteJid}: image cooldown active for ${Math.ceil(cooldownRemainingMs / 1000)}s`);
         } else {
@@ -569,6 +656,19 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (!mentionTriggered && !prefixTriggered && !replyTriggered) continue;
         const explicitImageRequest = isExplicitImageRequest(text);
+        const modelCommand = parseModelCommand(text);
+
+        if (modelCommand) {
+          console.log(`[chat] Model command triggered for ${remoteJid}: ${text}`);
+          withGroupLock(remoteJid, async () => {
+            try {
+              await handleModelCommand(configHolder, groupConfig, remoteJid, text, msg);
+            } catch (err) {
+              console.error('Failed to handle model command:', err);
+            }
+          });
+          continue;
+        }
 
         const limitDecision = admitTriggeredReply(remoteJid, groupConfig);
         if (!limitDecision.allowed) {
@@ -651,6 +751,19 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (!mentionTriggered && !prefixTriggered) continue;
         const explicitImageRequest = isExplicitImageRequest(text);
+        const modelCommand = parseModelCommand(text);
+
+        if (modelCommand) {
+          console.log(`[chat] Model command triggered for ${remoteJid} (edit): ${text}`);
+          withGroupLock(remoteJid, async () => {
+            try {
+              await handleModelCommand(configHolder, groupConfig, remoteJid, text);
+            } catch (err) {
+              console.error('Failed to handle model command (edit):', err);
+            }
+          });
+          continue;
+        }
 
         const limitDecision = admitTriggeredReply(remoteJid, groupConfig);
         if (!limitDecision.allowed) {

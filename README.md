@@ -1,11 +1,11 @@
 # WABot
 
-WABot is a WhatsApp group bot for persistent group automation. It combines scheduled event reminders, persona-driven Claude replies, Gemini image generation, passive group memory, and cron-driven autonomous posts.
+WABot is a WhatsApp group bot for persistent group automation. It combines scheduled event reminders, persona-driven multi-model replies, Gemini image generation, passive group memory, and cron-driven autonomous posts.
 
 Core features:
 
 1. **Events bot**: reads rows from a Google Sheet and sends scheduled messages to configured groups.
-2. **LLM chatbot**: replies in configured groups through Anthropic Claude, with optional web search, X/Twitter link enrichment, Gemini image generation, rate limiting, and a small web admin UI.
+2. **LLM chatbot**: replies in configured groups through a per-group text model selector (Claude, Gemini, or Gemma), with optional web search, X/Twitter link enrichment, Gemini image generation, rate limiting, and a small web admin UI.
 3. **Scheduled autonomous posts**: runs cron-driven prompt jobs that look at recent chat context, optionally search the web, ingest the latest local news digest, and publish an image+caption post even without a trigger.
 4. **Passive group memory**: records messages and refreshes member summaries for all configured groups, even if chatbot replies are disabled there.
 
@@ -84,7 +84,38 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
   "global": {
     "claudeModel": "claude-sonnet-4-6",
     "claudeMaxTokens": 1024,
-    "geminiImageModel": "gemini-3.1-flash-image-preview"
+    "chatMaxOutputTokens": 1024,
+    "geminiImageModel": "gemini-3.1-flash-image-preview",
+    "defaultChatModelId": "1a",
+    "chatModels": [
+      {
+        "id": "1a",
+        "label": "Claude Sonnet 4.6",
+        "provider": "anthropic",
+        "apiModel": "claude-sonnet-4-6",
+        "supportsWebSearch": true,
+        "supportsThinking": true,
+        "supportsThinkingConfig": true
+      },
+      {
+        "id": "1d",
+        "label": "Gemini 3.1 Pro",
+        "provider": "google",
+        "apiModel": "gemini-3.1-pro-preview",
+        "supportsWebSearch": true,
+        "supportsThinking": true,
+        "supportsThinkingConfig": true
+      },
+      {
+        "id": "1g",
+        "label": "Gemma 4 31B",
+        "provider": "google",
+        "apiModel": "gemma-4-31b-it",
+        "supportsWebSearch": false,
+        "supportsThinking": true,
+        "supportsThinkingConfig": false
+      }
+    ]
   },
   "groups": [
     {
@@ -101,6 +132,9 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
         "enabled": true,
         "botName": "familybot, fbot",
         "systemPrompt": "You are a warm family assistant.",
+        "allowedModelIds": ["1a", "1d", "1g"],
+        "defaultModelId": "1a",
+        "activeModelId": "1a",
         "enableThinking": true,
         "thinkingBudget": 2000,
         "enableWebSearch": true,
@@ -144,9 +178,12 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
 
 | Field | Default | Description |
 |---|---|---|
-| `claudeModel` | `claude-sonnet-4-6` | Anthropic model used for chatbot replies |
-| `claudeMaxTokens` | `1024` | Max output tokens for chatbot replies |
+| `claudeModel` | `claude-sonnet-4-6` | Anthropic model used by the background Anthropic-only flows such as scheduled-post drafting and profile summarization |
+| `claudeMaxTokens` | `1024` | Legacy Anthropic output cap used by existing Anthropic-only flows |
+| `chatMaxOutputTokens` | `1024` | Max output tokens for normal chatbot replies across all chat providers |
 | `geminiImageModel` | `gemini-3.1-flash-image-preview` | Gemini model used for image generation |
+| `defaultChatModelId` | first configured `chatModels` entry | Default group reply model id |
+| `chatModels` | built-in catalog | Global catalog of selectable chat reply models, including per-model capability flags such as web search and explicit thinking controls |
 
 ### Events Bot
 
@@ -211,6 +248,13 @@ The chatbot triggers when a user:
 
 Each configured group keeps its own in-memory message history. The default cap is `400` messages per group and can be changed with `CHAT_HISTORY_MAX`. This passive recording happens even in groups that only use events or scheduled posts, so later prompts and profile refreshes still have context. The bot also periodically summarizes group members into `group_profiles/<group-jid>.json` and feeds those summaries back into later prompts.
 
+Users can inspect and change the active reply model from chat:
+
+1. `<botname>, /model` lists the models allowed in that group
+2. `<botname>, /model <id>` switches the active reply model for the group
+
+The allowlist and default are chosen by admins in config or the admin web UI. The current active model is persisted in `groups.json`.
+
 #### Chatbot config fields
 
 | Field | Default | Description |
@@ -218,9 +262,12 @@ Each configured group keeps its own in-memory message history. The default cap i
 | `enabled` | `true` | Set to `false` to disable without removing the config |
 | `botName` | — | **Required.** Keyword prefix that triggers the bot. Multiple aliases can be provided as a comma-separated string |
 | `systemPrompt` | `You are a helpful assistant in a WhatsApp group chat. Be concise and friendly.` | Bot persona / system prompt |
-| `enableThinking` | `false` | Enable Claude's extended thinking |
-| `thinkingBudget` | `2000` | Max thinking tokens (only used if thinking is enabled) |
-| `enableWebSearch` | `false` | Allow Claude to search the web |
+| `allowedModelIds` | `[global.defaultChatModelId]` | Model ids that this group is allowed to switch between |
+| `defaultModelId` | first allowed model | Group default reply model |
+| `activeModelId` | `defaultModelId` | Currently selected reply model for the group |
+| `enableThinking` | `false` | Enable provider thinking/reasoning when the selected model supports it |
+| `thinkingBudget` | `2000` | Thinking intensity hint used for provider-specific thinking controls |
+| `enableWebSearch` | `false` | Allow web search when the selected model supports it |
 | `maxSearches` | `3` | Max web searches per response |
 | `hotness` | `35` | Controls how sharp or roasty the reply style can get |
 | `responseRateLimitCount` | `5` | Max triggered replies allowed inside the rate limit window |
@@ -229,9 +276,9 @@ Each configured group keeps its own in-memory message history. The default cap i
 | `enableImageGeneration` | `true` | Allow Gemini images for explicit image requests |
 | `enableAutoImageReplies` | `false` | Allow the bot to occasionally attach images to normal replies |
 
-If a user message contains `twitter.com`/`x.com` tweet URLs, the bot tries to fetch tweet details through the X API and appends that context to the text sent to Claude. Set `TWITTER_BEARER_TOKEN` to enable this.
+If a user message contains `twitter.com`/`x.com` tweet URLs, the bot tries to fetch tweet details through the X API and appends that context to the text sent to the selected reply model. Set `TWITTER_BEARER_TOKEN` to enable this.
 
-Reaction emojis are also generated by Claude in the same reply call. The bot now nudges Claude toward broader mood buckets and avoids reusing the same few emojis too often within a group.
+Reaction emojis are also generated in the same reply call. The bot nudges models toward broader mood buckets and avoids reusing the same few emojis too often within a group.
 
 ### Scheduled posts
 
@@ -266,7 +313,7 @@ If `ADMIN_TOKEN` is set, the bot starts an Express server at `http://localhost:W
 
 - `/admin` shows all known groups and links to group editors
 - `/admin/global` edits `global` config fields stored in `groups.json`
-- `/admin/group/:jid` edits chatbot, events, and scheduled-post settings for a group and can regenerate its `webToken`
+- `/admin/group/:jid` edits chatbot, per-group model allowlists/defaults, events, and scheduled-post settings for a group and can regenerate its `webToken`
 - `/group/:webToken` is a shareable per-group settings page for that group's chatbot, event, and scheduled-post settings
 
 Saving event or scheduled-post settings in the web UI immediately rebuilds the live cron schedule; a bot restart is not required for those edits to take effect.

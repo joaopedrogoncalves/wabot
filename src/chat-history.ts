@@ -1,5 +1,18 @@
 import type { MessageParam, ImageBlockParam, ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.js';
 
+export type GooglePart = {
+  text?: string;
+  inlineData?: {
+    mimeType: string;
+    data: string;
+  };
+};
+
+export type GoogleContent = {
+  role: 'user' | 'model';
+  parts: GooglePart[];
+};
+
 export interface ChatMessage {
   senderName: string;
   senderJid: string;
@@ -129,6 +142,41 @@ export function toAnthropicMessages(groupJid: string): MessageParam[] {
       } else {
         result.push({ role, content: textContent });
       }
+    }
+  }
+
+  return result;
+}
+
+export function toGoogleContents(groupJid: string): GoogleContent[] {
+  const messages = historyByGroup.get(groupJid) ?? [];
+  const result: GoogleContent[] = [];
+
+  for (const msg of messages) {
+    const role: 'user' | 'model' = msg.fromBot ? 'model' : 'user';
+    const textContent = msg.fromBot ? msg.text : `[${msg.senderName}]: ${msg.text}`;
+    const parts: GooglePart[] = [];
+
+    if (!msg.fromBot && msg.imageData && msg.imageMimeType) {
+      parts.push({
+        inlineData: {
+          mimeType: msg.imageMimeType,
+          data: msg.imageData,
+        },
+      });
+    }
+
+    if (msg.text) {
+      parts.push({ text: textContent });
+    } else if (parts.length === 0) {
+      parts.push({ text: textContent });
+    }
+
+    const last = result[result.length - 1];
+    if (last && last.role === role) {
+      last.parts.push(...parts);
+    } else {
+      result.push({ role, parts });
     }
   }
 

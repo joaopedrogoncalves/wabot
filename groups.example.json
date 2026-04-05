@@ -2,7 +2,38 @@
   "global": {
     "claudeModel": "claude-sonnet-4-6",
     "claudeMaxTokens": 1024,
-    "geminiImageModel": "gemini-3.1-flash-image-preview"
+    "chatMaxOutputTokens": 1024,
+    "geminiImageModel": "gemini-3.1-flash-image-preview",
+    "defaultChatModelId": "1a",
+    "chatModels": [
+      {
+        "id": "1a",
+        "label": "Claude Sonnet 4.6",
+        "provider": "anthropic",
+        "apiModel": "claude-sonnet-4-6",
+        "supportsWebSearch": true,
+        "supportsThinking": true,
+        "supportsThinkingConfig": true
+      },
+      {
+        "id": "1d",
+        "label": "Gemini 3.1 Pro",
+        "provider": "google",
+        "apiModel": "gemini-3.1-pro-preview",
+        "supportsWebSearch": true,
+        "supportsThinking": true,
+        "supportsThinkingConfig": true
+      },
+      {
+        "id": "1g",
+        "label": "Gemma 4 31B",
+        "provider": "google",
+        "apiModel": "gemma-4-31b-it",
+        "supportsWebSearch": false,
+        "supportsThinking": true,
+        "supportsThinkingConfig": false
+      }
+    ]
   },
   "groups": [
     {
@@ -20,6 +51,9 @@
         "enabled": true,
         "botName": "familybot, fbot",
         "systemPrompt": "You are a warm family assistant.",
+        "allowedModelIds": ["1a", "1d", "1g"],
+        "defaultModelId": "1a",
+        "activeModelId": "1a",
         "enableThinking": true,
         "thinkingBudget": 2000,
         "enableWebSearch": true,
@@ -51,6 +85,9 @@
         "enabled": true,
         "botName": "techbot",
         "systemPrompt": "You are a tech-savvy assistant.",
+        "allowedModelIds": ["1a", "1d"],
+        "defaultModelId": "1d",
+        "activeModelId": "1d",
         "hotness": 55,
         "responseRateLimitCount": 8,
         "responseRateLimitWindowSec": 90,

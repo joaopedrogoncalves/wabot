@@ -90,6 +90,17 @@ function parseScheduledPosts(rawValue: unknown, body: Record<string, unknown>): 
   return parsed;
 }
 
+function parseSelectedModelIds(rawValue: unknown): string[] {
+  if (Array.isArray(rawValue)) {
+    return rawValue
+      .map((value) => getTrimmedString(value))
+      .filter(Boolean);
+  }
+
+  const single = getTrimmedString(rawValue);
+  return single ? [single] : [];
+}
+
 export function startWebServer(
   configHolder: ConfigHolder,
   configPath: string,
@@ -130,6 +141,8 @@ export function startWebServer(
         if (req.body.claudeModel) raw.global.claudeModel = req.body.claudeModel;
         const maxTokens = parseInt(req.body.claudeMaxTokens, 10);
         if (!isNaN(maxTokens) && maxTokens > 0) raw.global.claudeMaxTokens = maxTokens;
+        const chatMaxOutputTokens = parseInt(req.body.chatMaxOutputTokens, 10);
+        if (!isNaN(chatMaxOutputTokens) && chatMaxOutputTokens > 0) raw.global.chatMaxOutputTokens = chatMaxOutputTokens;
         if (req.body.geminiImageModel) raw.global.geminiImageModel = req.body.geminiImageModel;
       });
       res.send(renderSuccess('Global settings saved.', `/admin?token=${adminToken}`));
@@ -145,7 +158,7 @@ export function startWebServer(
       return;
     }
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    res.send(renderAdminGroupEdit(group, adminToken, baseUrl));
+    res.send(renderAdminGroupEdit(configHolder.current, group, adminToken, baseUrl));
   });
 
   app.post('/admin/group/:jid', requireAdmin, async (req: Request, res: Response) => {
@@ -161,6 +174,19 @@ export function startWebServer(
         group.chatbot.enabled = !!req.body.chatbotEnabled;
         group.chatbot.botName = req.body.botName || group.chatbot.botName || 'bot';
         group.chatbot.systemPrompt = req.body.systemPrompt || group.chatbot.systemPrompt;
+        const allowedModelIds = parseSelectedModelIds(req.body.allowedModelIds);
+        const knownModelIds = new Set(configHolder.current.global.chatModels.map((model) => model.id.toLowerCase()));
+        const validAllowedModelIds = allowedModelIds.filter((id) => knownModelIds.has(id.toLowerCase()));
+        if (group.chatbot.enabled && validAllowedModelIds.length === 0) {
+          throw new Error('At least one allowed chat model must be selected when chatbot is enabled.');
+        }
+        group.chatbot.allowedModelIds = validAllowedModelIds;
+        const defaultModelId = getTrimmedString(req.body.defaultModelId);
+        group.chatbot.defaultModelId = validAllowedModelIds.find((id) => id.toLowerCase() === defaultModelId.toLowerCase())
+          ?? validAllowedModelIds[0];
+        if (group.chatbot.activeModelId && !validAllowedModelIds.some((id) => id.toLowerCase() === String(group.chatbot.activeModelId).toLowerCase())) {
+          group.chatbot.activeModelId = group.chatbot.defaultModelId;
+        }
         group.chatbot.enableThinking = req.body.enableThinking === '1';
         const thinkingBudget = parseInt(req.body.thinkingBudget, 10);
         if (!isNaN(thinkingBudget) && thinkingBudget > 0) group.chatbot.thinkingBudget = thinkingBudget;
@@ -221,7 +247,7 @@ export function startWebServer(
       return;
     }
     const saved = req.query['saved'] === '1';
-    res.send(renderGroupEdit(group, saved));
+    res.send(renderGroupEdit(configHolder.current, group, saved));
   });
 
   app.post('/group/:webToken', async (req: Request, res: Response) => {

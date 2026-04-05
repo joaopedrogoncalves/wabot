@@ -1,4 +1,5 @@
-import type { AppConfig, GlobalConfig, GroupConfig, ScheduledPostJobConfig } from '../config.js';
+import type { AppConfig, ChatModelConfig, GlobalConfig, GroupConfig, ScheduledPostJobConfig } from '../config.js';
+import { getAllowedChatModels, resolveGroupChatModel } from '../config.js';
 
 function esc(str: string): string {
   return str
@@ -117,6 +118,39 @@ function renderScheduledPostCard(
     <label>Prompt</label>
     <textarea class="textarea-compact" name="${prefix}Prompt_${index}" placeholder="Every morning, review the last day of discussion, search the web when useful, and post an image-led roundup.">${esc(job?.prompt ?? '')}</textarea>
   </div>`;
+}
+
+function renderModelAllowlistEditor(config: AppConfig, group: GroupConfig): string {
+  const chatbot = group.chatbot;
+  const allowedIds = new Set((chatbot?.allowedModelIds ?? []).map((id) => id.toLowerCase()));
+  const defaultModelId = chatbot?.defaultModelId ?? '';
+  const activeModel = chatbot ? resolveGroupChatModel(config.global, group) : null;
+
+  const checkboxes = config.global.chatModels.map((model) => {
+    const checked = allowedIds.has(model.id.toLowerCase());
+    const capabilities = [
+      model.provider,
+      ...(model.supportsWebSearch ? ['search'] : []),
+      ...(model.supportsThinking ? ['thinking'] : []),
+    ];
+    return `<div class="checkbox-row">
+      <input type="checkbox" id="allowedModel-${esc(model.id)}" name="allowedModelIds" value="${esc(model.id)}" ${checked ? 'checked' : ''}>
+      <label for="allowedModel-${esc(model.id)}">${esc(model.id)} — ${esc(model.label)} <span class="muted">[${esc(capabilities.join(', '))}]</span></label>
+    </div>`;
+  }).join('');
+
+  const defaultOptions = config.global.chatModels.map((model) =>
+    `<option value="${esc(model.id)}" ${defaultModelId.toLowerCase() === model.id.toLowerCase() ? 'selected' : ''}>${esc(model.id)} — ${esc(model.label)}</option>`
+  ).join('');
+
+  return `
+    <h2 style="margin-top:1.5rem">Chat Models</h2>
+    <p class="muted">Admins choose which reply models the group can use. Participants can then switch among the allowed ones with <code>/model</code>.</p>
+    ${checkboxes}
+    <label>Default Model</label>
+    <select name="defaultModelId">${defaultOptions}</select>
+    ${activeModel ? `<p class="muted">Current active model: <strong>${esc(activeModel.id)} — ${esc(activeModel.label)}</strong></p>` : ''}
+  `;
 }
 
 function renderScheduledPostsEditor(group: GroupConfig, editorId: string): string {
@@ -241,6 +275,19 @@ export function renderAdminDashboard(config: AppConfig, adminToken: string): str
 
 export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): string {
   const g = config.global;
+  const modelRows = g.chatModels.map((model) => {
+    const capabilities = [
+      model.provider,
+      ...(model.supportsWebSearch ? ['search'] : []),
+      ...(model.supportsThinking ? ['thinking'] : []),
+    ];
+    return `<tr>
+      <td><code>${esc(model.id)}</code></td>
+      <td>${esc(model.label)}</td>
+      <td><code>${esc(model.apiModel)}</code></td>
+      <td>${esc(capabilities.join(', '))}</td>
+    </tr>`;
+  }).join('');
   const body = `
     <h1>Global Settings</h1>
     <div class="nav">
@@ -256,6 +303,16 @@ export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): st
 
         <label>Gemini Image Model</label>
         <input type="text" name="geminiImageModel" value="${esc(g.geminiImageModel)}">
+
+        <label>Chat Max Output Tokens</label>
+        <input type="number" name="chatMaxOutputTokens" value="${g.chatMaxOutputTokens}" min="1">
+
+        <h2 style="margin-top:1.5rem">Chat Model Catalog</h2>
+        <p class="muted">The catalog is config-defined. These are the currently loaded model ids available to group admins.</p>
+        <table>
+          <thead><tr><th>ID</th><th>Label</th><th>API Model</th><th>Capabilities</th></tr></thead>
+          <tbody>${modelRows}</tbody>
+        </table>
 
         <label>Anthropic API Key</label>
         <p class="masked">${g.anthropicApiKey ? 'Set (from environment)' : 'Not set'}</p>
@@ -277,7 +334,7 @@ export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): st
   return renderLayout('Global Settings', body);
 }
 
-export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, baseUrl: string): string {
+export function renderAdminGroupEdit(config: AppConfig, group: GroupConfig, adminToken: string, baseUrl: string): string {
   const chatbot = group.chatbot;
   const events = group.events;
   const groupUrl = group.webToken ? `${baseUrl}/group/${group.webToken}` : '';
@@ -310,6 +367,8 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
 
         <label>System Prompt</label>
         <textarea name="systemPrompt">${esc(chatbot?.systemPrompt ?? '')}</textarea>
+
+        ${renderModelAllowlistEditor(config, group)}
 
         <div class="checkbox-row">
           <input type="checkbox" id="enableThinking" name="enableThinking" value="1" ${chatbot?.enableThinking ? 'checked' : ''}>
@@ -381,8 +440,10 @@ export function renderAdminGroupEdit(group: GroupConfig, adminToken: string, bas
   return renderLayout(`Edit ${group.name ?? group.jid}`, body);
 }
 
-export function renderGroupEdit(group: GroupConfig, saved?: boolean): string {
+export function renderGroupEdit(config: AppConfig, group: GroupConfig, saved?: boolean): string {
   const chatbot = group.chatbot;
+  const allowedModels = chatbot ? getAllowedChatModels(config.global, group) : [];
+  const activeModel = chatbot ? resolveGroupChatModel(config.global, group) : null;
   const body = `
     <h1>${esc(group.name ?? group.jid)} - Chatbot Settings</h1>
 
@@ -395,6 +456,9 @@ export function renderGroupEdit(group: GroupConfig, saved?: boolean): string {
 
         <label>System Prompt</label>
         <textarea name="systemPrompt">${esc(chatbot?.systemPrompt ?? '')}</textarea>
+
+        ${activeModel ? `<p class="muted">Current model: <strong>${esc(activeModel.id)} — ${esc(activeModel.label)}</strong></p>` : ''}
+        ${allowedModels.length > 0 ? `<p class="muted">Allowed models: ${allowedModels.map((model) => `${esc(model.id)} — ${esc(model.label)}`).join(', ')}. Use <code>/model</code> in chat to switch.</p>` : ''}
 
         <div class="checkbox-row">
           <input type="checkbox" id="enableThinking" name="enableThinking" value="1" ${chatbot?.enableThinking ? 'checked' : ''}>

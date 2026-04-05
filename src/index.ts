@@ -17,7 +17,7 @@ async function main() {
   const whatsappGroups = await listGroups();
   const config = syncGroups(configPath, whatsappGroups);
 
-  const configHolder: ConfigHolder = { current: config };
+  const configHolder: ConfigHolder = { current: config, path: configPath };
 
   const eventGroups = config.groups.filter((g) => g.events);
   const chatbotGroups = config.groups.filter((g) => g.chatbot && g.chatbot.enabled !== false);
