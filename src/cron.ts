@@ -1,4 +1,4 @@
-import cron from 'node-cron';
+import cron, { type ScheduledTask } from 'node-cron';
 import type { AppConfig, ConfigHolder, GroupConfig, ScheduledPostJobConfig } from './config.js';
 import { getHistorySince } from './chat-history.js';
 import { fetchEventRows } from './sheets.js';
@@ -43,6 +43,20 @@ export async function checkAllEvents(configHolder: ConfigHolder): Promise<void> 
   for (const group of config.groups) {
     if (group.events) {
       await checkEventsForGroup(config, group);
+    }
+  }
+}
+
+let eventCronTasks: ScheduledTask[] = [];
+let scheduledPostCronTasks: ScheduledTask[] = [];
+
+async function stopCronTasks(tasks: ScheduledTask[], label: string): Promise<void> {
+  for (const task of tasks) {
+    try {
+      await task.stop();
+      await task.destroy();
+    } catch (error) {
+      console.error(`[cron] Failed to stop ${label} task ${task.id}:`, error);
     }
   }
 }
@@ -99,7 +113,10 @@ async function runScheduledPostJob(
   }
 }
 
-export function startEventCrons(configHolder: ConfigHolder): void {
+export async function startEventCrons(configHolder: ConfigHolder): Promise<void> {
+  await stopCronTasks(eventCronTasks, 'event');
+  eventCronTasks = [];
+
   const config = configHolder.current;
   const bySchedule = new Map<string, string[]>();
 
@@ -121,19 +138,23 @@ export function startEventCrons(configHolder: ConfigHolder): void {
     }).join(', ');
     console.log(`Scheduling events cron "${schedule}" for: ${names}`);
 
-    cron.schedule(schedule, () => {
+    const task = cron.schedule(schedule, () => {
       const currentConfig = configHolder.current;
       for (const jid of jids) {
         const group = currentConfig.groups.find((g) => g.jid === jid);
         if (group?.events) {
-          checkEventsForGroup(currentConfig, group);
+          void checkEventsForGroup(currentConfig, group);
         }
       }
     });
+    eventCronTasks.push(task);
   }
 }
 
-export function startScheduledPostCrons(configHolder: ConfigHolder): void {
+export async function startScheduledPostCrons(configHolder: ConfigHolder): Promise<void> {
+  await stopCronTasks(scheduledPostCronTasks, 'scheduled post');
+  scheduledPostCronTasks = [];
+
   const config = configHolder.current;
   const scheduledJobs = config.groups.flatMap((group) =>
     (group.scheduledPosts ?? []).map((job, index) => ({ groupJid: group.jid, jobIndex: index, job })),
@@ -146,7 +167,7 @@ export function startScheduledPostCrons(configHolder: ConfigHolder): void {
       `Scheduling scheduled post cron "${job.cronSchedule}" for "${groupLabel}" / "${job.label ?? `scheduled-post-${jobIndex + 1}`}"`,
     );
 
-    cron.schedule(job.cronSchedule, () => {
+    const task = cron.schedule(job.cronSchedule, () => {
       const currentConfig = configHolder.current;
       const currentGroup = currentConfig.groups.find((entry) => entry.jid === groupJid);
       const currentJob = currentGroup?.scheduledPosts?.[jobIndex];
@@ -155,5 +176,6 @@ export function startScheduledPostCrons(configHolder: ConfigHolder): void {
       }
       void runScheduledPostJob(currentConfig, currentGroup, currentJob);
     });
+    scheduledPostCronTasks.push(task);
   }
 }

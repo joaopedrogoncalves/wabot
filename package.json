@@ -1,7 +1,7 @@
 {
   "name": "wabot",
   "version": "1.0.0",
-  "description": "",
+  "description": "WhatsApp group bot for scheduled events, Claude chat replies, Gemini images, passive group profiling, and autonomous cron posts",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -9,7 +9,15 @@
     "start:loop": "while true; do NODE_OPTIONS='--experimental-global-webcrypto' tsx src/index.ts; echo \"Process exited ($?), restarting in 5s...\"; sleep 5; done",
     "dev": "NODE_OPTIONS='--experimental-global-webcrypto' tsx watch src/index.ts"
   },
-  "keywords": [],
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "anthropic",
+    "claude",
+    "gemini",
+    "automation",
+    "cron"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {

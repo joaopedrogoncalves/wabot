@@ -33,12 +33,16 @@ async function main() {
   );
   logTwitterConfigStatus(config.global);
 
-  if (chatbotGroups.length > 0) {
-    const names = chatbotGroups.map((g) => `${g.name ?? g.jid} (${g.chatbot!.botName})`);
-    console.log(`Chatbot enabled for: ${names.join(', ')}`);
+  if (config.groups.length > 0) {
+    if (chatbotGroups.length > 0) {
+      const names = chatbotGroups.map((g) => `${g.name ?? g.jid} (${g.chatbot!.botName})`);
+      console.log(`Chatbot enabled for: ${names.join(', ')}`);
+    } else {
+      console.log('No groups with chatbot configured; running passive message recording only.');
+    }
     setupChatHandler(configHolder);
   } else {
-    console.log('No groups with chatbot configured.');
+    console.log('No groups configured.');
   }
 
   for (const group of eventGroups) {
@@ -56,13 +60,13 @@ async function main() {
   }
 
   if (eventGroups.length > 0) {
-    startEventCrons(configHolder);
+    await startEventCrons(configHolder);
   } else {
     console.log('No groups with events configured.');
   }
 
   if (scheduledPostCount > 0) {
-    startScheduledPostCrons(configHolder);
+    await startScheduledPostCrons(configHolder);
   } else {
     console.log('No scheduled post jobs configured.');
   }

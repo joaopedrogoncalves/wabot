@@ -2,6 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import { randomUUID } from 'crypto';
 import type { ConfigHolder } from '../config.js';
 import { updateConfigFile } from '../config.js';
+import { startEventCrons, startScheduledPostCrons } from '../cron.js';
 import {
   renderAdminDashboard,
   renderAdminGlobalEdit,
@@ -98,6 +99,11 @@ export function startWebServer(
   const app = express();
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
+  async function refreshCronSchedules(): Promise<void> {
+    await startEventCrons(configHolder);
+    await startScheduledPostCrons(configHolder);
+  }
+
   // Admin auth middleware
   function requireAdmin(req: Request, res: Response, next: NextFunction): void {
     if (req.query['token'] !== adminToken) {
@@ -142,7 +148,7 @@ export function startWebServer(
     res.send(renderAdminGroupEdit(group, adminToken, baseUrl));
   });
 
-  app.post('/admin/group/:jid', requireAdmin, (req: Request, res: Response) => {
+  app.post('/admin/group/:jid', requireAdmin, async (req: Request, res: Response) => {
     try {
       const jid = req.params['jid'];
       updateConfigFile(configPath, configHolder, (raw) => {
@@ -184,6 +190,7 @@ export function startWebServer(
 
         group.scheduledPosts = parseScheduledPosts(req.body.scheduledPostsJson, req.body);
       });
+      await refreshCronSchedules();
       res.send(renderSuccess('Group settings saved.', `/admin?token=${adminToken}`));
     } catch (err) {
       res.status(500).send(renderError(`Failed to save: ${err}`));
@@ -217,7 +224,7 @@ export function startWebServer(
     res.send(renderGroupEdit(group, saved));
   });
 
-  app.post('/group/:webToken', (req: Request, res: Response) => {
+  app.post('/group/:webToken', async (req: Request, res: Response) => {
     const webToken = req.params['webToken'];
     const group = configHolder.current.groups.find((g) => g.webToken === webToken);
     if (!group) {
@@ -252,6 +259,7 @@ export function startWebServer(
         g.chatbot.enableAutoImageReplies = req.body.enableAutoImageReplies === '1';
         g.scheduledPosts = parseScheduledPosts(req.body.scheduledPostsJson, req.body);
       });
+      await refreshCronSchedules();
 
       // Re-lookup the webToken (it shouldn't change, but use fresh config)
       const updatedGroup = configHolder.current.groups.find((g) => g.jid === jid);
