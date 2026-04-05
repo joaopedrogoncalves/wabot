@@ -223,6 +223,8 @@ function sanitizeReplyTextForDelivery(text: string): string {
     .replace(/!\[[\s\S]*?\]\((?:https?:\/\/)?[^)\s]+(?:\?[^)\s]*)?\)/giu, ' ')
     .replace(/https?:\/\/image\.pollinations\.ai\/\S+/giu, ' ')
     .replace(/\[\s*(?:imagem|image|image prompt|prompt de imagem|image description|caption)\s*:\s*[\s\S]*?\]/giu, ' ')
+    .replace(/\n?\s*---+\s*\n?\s*(?:[*_`#>\- ]*)?(?:imagem gerada|image generated|prompt de imagem|image prompt|imagem|image)\s*:\s*[\s\S]*$/giu, ' ')
+    .replace(/\n?\s*(?:[*_`#>\- ]*)?(?:imagem gerada|image generated|prompt de imagem|image prompt|imagem|image)\s*:\s*[\s\S]*$/giu, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
@@ -248,6 +250,7 @@ async function sendGeneratedReply(
   groupConfig: GroupConfig,
   remoteJid: string,
   primaryBotName: string,
+  triggerSenderName: string,
   latestUserText: string,
   explicitImageRequest: boolean,
   reactionTargetKey?: WAMessageKey,
@@ -262,6 +265,8 @@ async function sendGeneratedReply(
     && groupConfig.chatbot?.enableAutoImageReplies === true;
   const response = await generateResponse(configHolder.current, groupConfig, remoteJid, {
     expectsImage: canGenerateDirectImages && explicitImageRequest,
+    latestUserText,
+    triggerSenderName,
   });
   const resolved = resolveMentions(remoteJid, response.text);
   const mentions = resolved.mentions;
@@ -312,6 +317,9 @@ async function sendGeneratedReply(
           textInImage: imagePlan.textInImage,
         } : undefined;
         imageReason = 'direct request';
+        if (!imagePrompt) {
+          console.warn(`[chat] Direct image request for ${remoteJid} produced no usable image prompt; falling back to text reply.`);
+        }
       } else if (!explicitImageRequest && canGenerateAutoImages) {
         const cooldownRemainingMs = getImageCooldownRemainingMs(remoteJid);
         const shouldForceLongReplyImage = responseText.length >= AUTO_IMAGE_LONG_REPLY_THRESHOLD
@@ -453,10 +461,12 @@ async function getCachedRateLimitWarning(
 
 export function setupChatHandler(configHolder: ConfigHolder): void {
   onConnectionReady((sock: WASocket) => {
-    const jids = configHolder.current.groups
+    const allJids = configHolder.current.groups.map((g) => g.jid);
+    const chatbotJids = configHolder.current.groups
       .filter((g) => g.chatbot && g.chatbot.enabled !== false)
       .map((g) => g.jid);
-    console.log(`Chat handler registered for groups: ${jids.join(', ')}`);
+    console.log(`Message recorder registered for groups: ${allJids.join(', ')}`);
+    console.log(`Chat replies enabled for groups: ${chatbotJids.join(', ') || '(none)'}`);
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       console.log(`[chat] messages.upsert: type=${type}, count=${messages.length}`);
@@ -473,10 +483,11 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         console.log(`[chat] MSG from=${rawSender} jid=${remoteJid} participant=${msg.key.participant ?? 'N/A'} text=${rawText ? `"${rawText.slice(0, 80)}"` : '(no text)'}`);
 
         const config = configHolder.current;
-        const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot && g.chatbot.enabled !== false);
-        if (!groupConfig) continue;
-        const botAliases = parseBotAliases(groupConfig.chatbot!.botName);
-        const primaryBotName = botAliases[0] ?? groupConfig.chatbot!.botName;
+        const groupEntry = config.groups.find((g) => g.jid === remoteJid);
+        if (!groupEntry) continue;
+        const groupConfig = groupEntry.chatbot && groupEntry.chatbot.enabled !== false ? groupEntry : null;
+        const botAliases = groupConfig ? parseBotAliases(groupConfig.chatbot!.botName) : [];
+        const primaryBotName = groupConfig ? (botAliases[0] ?? groupConfig.chatbot!.botName) : '';
 
         // Handle emoji reactions
         const reaction = msg.message?.reactionMessage;
@@ -498,6 +509,9 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
             text: `[reacted ${emoji} to ${targetLabel}]`,
             fromBot,
           });
+          if (!fromBot) {
+            maybeRefreshProfiles(config, remoteJid);
+          }
           console.log(`[chat] Reaction ${emoji} from ${reactorName} to ${targetLabel}`);
           continue;
         }
@@ -525,8 +539,13 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           ...(image && { imageData: image.data, imageMimeType: image.mimeType }),
         });
 
+        if (!fromBot) {
+          maybeRefreshProfiles(config, remoteJid);
+        }
+
         // Skip trigger check for bot's own messages
         if (fromBot) continue;
+        if (!groupConfig) continue;
 
         // Image-only messages (no text) are recorded but don't trigger a response
         if (!text) continue;
@@ -576,6 +595,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
               groupConfig,
               remoteJid,
               primaryBotName,
+              senderName,
               text,
               explicitImageRequest,
               msg.key,
@@ -595,10 +615,11 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         if (!remoteJid) continue;
 
         const config = configHolder.current;
-        const groupConfig = config.groups.find((g) => g.jid === remoteJid && g.chatbot && g.chatbot.enabled !== false);
-        if (!groupConfig) continue;
-        const botAliases = parseBotAliases(groupConfig.chatbot!.botName);
-        const primaryBotName = botAliases[0] ?? groupConfig.chatbot!.botName;
+        const groupEntry = config.groups.find((g) => g.jid === remoteJid);
+        if (!groupEntry) continue;
+        const groupConfig = groupEntry.chatbot && groupEntry.chatbot.enabled !== false ? groupEntry : null;
+        const botAliases = groupConfig ? parseBotAliases(groupConfig.chatbot!.botName) : [];
+        const primaryBotName = groupConfig ? (botAliases[0] ?? groupConfig.chatbot!.botName) : '';
 
         const editedMessage = (update.update as any)?.message?.editedMessage?.message;
         if (!editedMessage) continue;
@@ -615,6 +636,8 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         // Update chat history with edited text
         if (messageId) updateMessageText(remoteJid, messageId, enrichedText);
+        maybeRefreshProfiles(config, remoteJid);
+        if (!groupConfig) continue;
 
         // Check triggers: prefix or @mention (no reply check for edits)
         const mentionedJids = extractMentionedJids({ message: editedMessage });
@@ -645,6 +668,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (messageId) trackTriggered(messageId);
         const senderJid = update.key.participant ?? update.key.remoteJid ?? '';
+        const triggerSenderName = senderJid;
         console.log(`[chat] Edit triggered by ${senderJid}: ${text}`);
         console.log(`[chat] Rate limit admitted for ${remoteJid} (edit): ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
 
@@ -655,6 +679,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
               groupConfig,
               remoteJid,
               primaryBotName,
+              triggerSenderName,
               text,
               explicitImageRequest,
               update.key,

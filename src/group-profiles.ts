@@ -72,6 +72,8 @@ export function getProfilesPrompt(groupJid: string): string {
 }
 
 export function maybeRefreshProfiles(config: AppConfig, groupJid: string): void {
+  if (!config.global.anthropicApiKey) return;
+
   const profiles = loadProfiles(groupJid);
   const now = Date.now();
   const timeSince = now - profiles.lastSummaryAt;

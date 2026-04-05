@@ -9,6 +9,8 @@ let client: Anthropic | null = null;
 
 type ResponseGenerationOptions = {
   expectsImage?: boolean;
+  latestUserText?: string;
+  triggerSenderName?: string;
 };
 
 export type GeneratedReply = {
@@ -329,6 +331,30 @@ function parseJsonResponse<T>(text: string): T | null {
   }
 }
 
+function extractInlineImagePromptText(text: string): string | null {
+  const normalized = text.replace(/\r\n/g, '\n').trim();
+  const patterns = [
+    /(?:^|\n)\s*(?:[*_`#>\- ]*)?(?:imagem gerada|image generated|prompt de imagem|image prompt|imagem|image)\s*:\s*([\s\S]+)$/iu,
+    /(?:^|\n)\s*---+\s*(?:\n+)?([\s\S]+)$/u,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    const candidate = match?.[1]?.trim();
+    if (!candidate) continue;
+    const cleaned = candidate
+      .replace(/^[-*]\s*/gm, '')
+      .replace(/\[\[reaction:[^\]]+\]\]\s*$/iu, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    if (cleaned && cleaned.length >= 16) {
+      return cleaned;
+    }
+  }
+
+  return null;
+}
+
 function normalizeStringList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const items = value
@@ -364,6 +390,41 @@ function parseImagePlan(value: unknown, defaults?: {
     textInImage,
     literalness,
   };
+}
+
+function parseImagePlanResponse(
+  responseText: string,
+  logLabel: string,
+  defaults?: {
+    literalness?: ImageLiteralness;
+    textInImage?: ImageTextPolicy;
+  },
+): GeneratedImagePlan | null {
+  const parsed = parseJsonResponse<GeneratedImagePlan | JsonImageDecision | JsonScheduledPost>(responseText);
+  const candidate = parsed && typeof parsed === 'object' && 'prompt' in parsed
+    ? parsed
+    : parsed && typeof parsed === 'object' && 'image' in parsed
+      ? parsed.image
+      : null;
+  const imagePlan = parseImagePlan(candidate, defaults);
+  if (imagePlan) {
+    return imagePlan;
+  }
+
+  const fallbackPrompt = extractInlineImagePromptText(responseText);
+  if (fallbackPrompt) {
+    console.warn(`[llm] ${logLabel} returned non-JSON image content; salvaging inline image prompt.`);
+    console.warn(`[llm] ${logLabel} raw response preview: ${responseText.slice(0, 500)}`);
+    return {
+      prompt: fallbackPrompt,
+      literalness: defaults?.literalness ?? 'balanced',
+      textInImage: defaults?.textInImage ?? 'none',
+    };
+  }
+
+  console.warn(`[llm] ${logLabel} returned no usable image plan.`);
+  console.warn(`[llm] ${logLabel} raw response preview: ${responseText.slice(0, 500)}`);
+  return null;
 }
 
 async function runPlanningPrompt(
@@ -420,7 +481,22 @@ export async function generateResponse(
   options: ResponseGenerationOptions = {},
 ): Promise<GeneratedReply> {
   const anthropic = getClient(config.global.anthropicApiKey);
-  const messages = toAnthropicMessages(groupJid);
+  const historyMessages = toAnthropicMessages(groupJid);
+  const latestUserText = options.latestUserText?.trim();
+  const triggerSenderName = options.triggerSenderName?.trim() || 'User';
+  const messages = latestUserText
+    ? [
+        ...historyMessages,
+        {
+          role: 'user' as const,
+          content: [
+            `Respond now to this specific message from [${triggerSenderName}].`,
+            `Target message:\n[${triggerSenderName}]: ${latestUserText}`,
+            'Use the full conversation above as context, including any newer assistant replies, but make this target message the one you answer now.',
+          ].join('\n\n'),
+        },
+      ]
+    : historyMessages;
 
   if (messages.length === 0) {
     return { text: "I don't have any context yet. How can I help you?" };
@@ -494,7 +570,7 @@ export async function generateResponse(
   console.log(`[llm]   hotness=${chatbot.hotness ?? 35}, sampledTone=${dynamicStyle.band} (${dynamicStyle.intensity.toFixed(2)})`);
   const systemPreview = getGroupSystemPrompt(groupConfig);
   console.log(`[llm]   system="${systemPreview.substring(0, 120)}${systemPreview.length > 120 ? '...' : ''}"`);
-  console.log(`[llm]   messages=${messages.length}, thinking=${chatbot.enableThinking ?? false}${params.output_config ? ` (${JSON.stringify(params.output_config)})` : ''}, webSearch=${chatbot.enableWebSearch ?? false}${chatbot.enableWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
+  console.log(`[llm]   messages=${messages.length}, syntheticFinalUser=${latestUserText ? 'yes' : 'no'}, thinking=${chatbot.enableThinking ?? false}${params.output_config ? ` (${JSON.stringify(params.output_config)})` : ''}, webSearch=${chatbot.enableWebSearch ?? false}${chatbot.enableWebSearch ? ` (max ${chatbot.maxSearches ?? 3})` : ''}`);
   if (params.tools) {
     console.log(`[llm]   tools=${JSON.stringify(params.tools)}`);
   }
@@ -599,8 +675,11 @@ export async function generateImagePromptForDirectRequest(
     220,
   );
 
-  const parsed = parseJsonResponse<GeneratedImagePlan>(responseText);
-  return parseImagePlan(parsed, { literalness: 'balanced', textInImage: 'none' });
+  return parseImagePlanResponse(
+    responseText,
+    `Direct image planner for "${groupConfig.name ?? groupJid}"`,
+    { literalness: 'balanced', textInImage: 'none' },
+  );
 }
 
 export async function decideImageForReply(
@@ -637,7 +716,13 @@ export async function decideImageForReply(
   );
 
   const parsed = parseJsonResponse<JsonImageDecision>(responseText);
-  const image = parseImagePlan(parsed?.image, { literalness: 'balanced', textInImage: 'none' });
+  const image = parsed?.image
+    ? parseImagePlan(parsed.image, { literalness: 'balanced', textInImage: 'none' })
+    : null;
+  if (!image && parsed?.shouldGenerate === true) {
+    console.warn(`[llm] Auto image decision for "${groupConfig.name ?? groupJid}" requested an image but returned no usable plan.`);
+    console.warn(`[llm] Auto image decision raw response preview: ${responseText.slice(0, 500)}`);
+  }
   return {
     shouldGenerate: parsed?.shouldGenerate === true && !!image,
     image,
@@ -678,8 +763,11 @@ export async function generateImagePromptForReply(
     220,
   );
 
-  const parsed = parseJsonResponse<GeneratedImagePlan>(responseText);
-  return parseImagePlan(parsed, { literalness: 'balanced', textInImage: 'none' });
+  return parseImagePlanResponse(
+    responseText,
+    `Reply image planner for "${groupConfig.name ?? groupJid}"`,
+    { literalness: 'balanced', textInImage: 'none' },
+  );
 }
 
 export async function generateScheduledImagePost(
