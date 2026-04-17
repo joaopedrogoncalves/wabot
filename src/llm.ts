@@ -67,6 +67,7 @@ const GOOGLE_REASONING_LEAK_PATTERNS = [
   /\bNeed to\b/iu,
 ];
 const MAX_RECENT_REACTION_EMOJIS = 8;
+const IMAGE_PLAN_MAX_TOKENS = 900;
 const recentReactionEmojisByGroup = new Map<string, string[]>();
 const REACTION_EMOJI_MOOD_GUIDE = [
   'mocking laughter / absurdity: 😂 🤣 😹 😭',
@@ -721,6 +722,31 @@ function parseJsonResponse<T>(text: string): T | null {
   }
 }
 
+function extractLooseJsonStringField(text: string, fieldName: string): string | undefined {
+  const field = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`"${field}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'su'));
+  if (!match?.[1]) return undefined;
+  try {
+    return JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+}
+
+function extractLooseJsonEnumField<T extends string>(
+  text: string,
+  fieldName: string,
+  allowed: readonly T[],
+): T | undefined {
+  const value = extractLooseJsonStringField(text, fieldName);
+  return allowed.includes(value as T) ? value as T : undefined;
+}
+
+function hasLooseBooleanField(text: string, fieldName: string, expected: boolean): boolean {
+  const field = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`"${field}"\\s*:\\s*${expected ? 'true' : 'false'}\\b`, 'iu').test(text);
+}
+
 function extractInlineImagePromptText(text: string): string | null {
   const normalized = text.replace(/\r\n/g, '\n').trim();
   const patterns = [
@@ -782,6 +808,33 @@ function parseImagePlan(value: unknown, defaults?: {
   };
 }
 
+function extractLooseImagePlan(responseText: string, defaults?: {
+  literalness?: ImageLiteralness;
+  textInImage?: ImageTextPolicy;
+}): GeneratedImagePlan | null {
+  const prompt = extractLooseJsonStringField(responseText, 'prompt')?.trim();
+  if (!prompt) return null;
+
+  const literalness = extractLooseJsonEnumField<ImageLiteralness>(
+    responseText,
+    'literalness',
+    ['vibe', 'balanced', 'literal'],
+  ) ?? defaults?.literalness ?? 'balanced';
+  const textInImage = extractLooseJsonEnumField<ImageTextPolicy>(
+    responseText,
+    'textInImage',
+    ['none', 'minimal', 'allowed'],
+  ) ?? defaults?.textInImage ?? 'none';
+
+  return {
+    prompt,
+    mood: extractLooseJsonStringField(responseText, 'mood')?.trim() || undefined,
+    style: extractLooseJsonStringField(responseText, 'style')?.trim() || undefined,
+    literalness,
+    textInImage,
+  };
+}
+
 function parseImagePlanResponse(
   responseText: string,
   logLabel: string,
@@ -799,6 +852,13 @@ function parseImagePlanResponse(
   const imagePlan = parseImagePlan(candidate, defaults);
   if (imagePlan) {
     return imagePlan;
+  }
+
+  const looseImagePlan = extractLooseImagePlan(responseText, defaults);
+  if (looseImagePlan) {
+    console.warn(`[llm] ${logLabel} returned invalid JSON image content; salvaging loose image plan.`);
+    console.warn(`[llm] ${logLabel} raw response preview: ${responseText.slice(0, 500)}`);
+    return looseImagePlan;
   }
 
   const fallbackPrompt = extractInlineImagePromptText(responseText);
@@ -967,6 +1027,7 @@ export async function generateImagePromptForDirectRequest(
       'The user directly asked for an image.',
       'Return JSON only with the shape {"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}',
       'Write a single self-contained prompt suitable for a modern text-to-image model.',
+      'Keep the image prompt compact: ideally under 90 words.',
       'Carry over the conversation context, the bot persona, and the tone of the reply.',
       'Use literalness="balanced" by default. Only use literalness="literal" when the user clearly wants exact depiction. Use literalness="vibe" when mood matters more than exact scene details.',
       'Default to textInImage="none" unless the user explicitly asked for readable text, a poster, a sign, a screenshot, a headline, or typography as part of the image.',
@@ -982,7 +1043,7 @@ export async function generateImagePromptForDirectRequest(
       `Planned bot reply/caption:\n${replyText}`,
       'Return the JSON now.',
     ].join('\n\n'),
-    220,
+    IMAGE_PLAN_MAX_TOKENS,
   );
 
   return parseImagePlanResponse(
@@ -1010,6 +1071,7 @@ export async function decideImageForReply(
       'Return JSON only with the shape {"shouldGenerate":true|false,"image":{"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}}',
       'If shouldGenerate is false, set image to null or an empty prompt.',
       'If shouldGenerate is true, write a self-contained image prompt that reflects the bot persona and the reply.',
+      'Keep any image prompt compact: ideally under 90 words.',
       'Default to literalness="balanced". Use literalness="vibe" when the image should mainly convey mood, body language, tension, or comedic atmosphere rather than literal sentence content.',
       'Default to textInImage="none". Only allow readable text if the conversation explicitly calls for it.',
       'Prefer an image prompt in English unless the user explicitly asked for another language in the image.',
@@ -1022,20 +1084,27 @@ export async function decideImageForReply(
       `Planned bot reply:\n${replyText}`,
       'Return the JSON now.',
     ].join('\n\n'),
-    220,
+    IMAGE_PLAN_MAX_TOKENS,
   );
 
   const parsed = parseJsonResponse<JsonImageDecision>(responseText);
   const image = parsed?.image
     ? parseImagePlan(parsed.image, { literalness: 'balanced', textInImage: 'none' })
     : null;
+  const looseImage = !parsed && hasLooseBooleanField(responseText, 'shouldGenerate', true)
+    ? extractLooseImagePlan(responseText, { literalness: 'balanced', textInImage: 'none' })
+    : null;
   if (!image && parsed?.shouldGenerate === true) {
     console.warn(`[llm] Auto image decision for "${groupConfig.name ?? groupJid}" requested an image but returned no usable plan.`);
     console.warn(`[llm] Auto image decision raw response preview: ${responseText.slice(0, 500)}`);
   }
+  if (looseImage) {
+    console.warn(`[llm] Auto image decision for "${groupConfig.name ?? groupJid}" returned invalid JSON; salvaging loose image plan.`);
+    console.warn(`[llm] Auto image decision raw response preview: ${responseText.slice(0, 500)}`);
+  }
   return {
-    shouldGenerate: parsed?.shouldGenerate === true && !!image,
-    image,
+    shouldGenerate: (parsed?.shouldGenerate === true && !!image) || !!looseImage,
+    image: image ?? looseImage,
   };
 }
 
@@ -1056,6 +1125,7 @@ export async function generateImagePromptForReply(
       `Reason for adding an image: ${reason}.`,
       'Return JSON only with the shape {"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}',
       'Write a single self-contained image prompt suitable for a modern text-to-image model.',
+      'Keep the image prompt compact: ideally under 90 words.',
       'Reflect the same persona, joke, atmosphere, and subject matter as the reply.',
       'Default to literalness="balanced". Use literalness="vibe" when the image should mainly capture mood, tension, or the comedic setup rather than literal wording.',
       'Default to textInImage="none". Do not ask for readable text unless the conversation explicitly requested it.',
@@ -1070,7 +1140,7 @@ export async function generateImagePromptForReply(
       `Planned bot reply:\n${replyText}`,
       'Return the JSON now.',
     ].join('\n\n'),
-    220,
+    IMAGE_PLAN_MAX_TOKENS,
   );
 
   return parseImagePlanResponse(
