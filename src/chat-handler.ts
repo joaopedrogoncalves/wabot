@@ -3,12 +3,14 @@ import type { ConfigHolder, GroupConfig } from './config.js';
 import { getAllowedChatModels, isChatModelAvailable, resolveGroupChatModel, updateConfigFile } from './config.js';
 import { addMessage, findMessageById, getNameToJidMap, getRecentBotMessages, updateMessageText } from './chat-history.js';
 import { generateImage } from './gemini.js';
+import { cleanupGeneratedVideo, generateVideo } from './gemini-video.js';
 import {
   decideImageForReply,
   generateImagePromptForDirectRequest,
   generateImagePromptForReply,
   generateRateLimitWarning,
   generateResponse,
+  generateVideoPromptForDirectRequest,
   recordRecentReactionEmoji,
 } from './llm.js';
 import { maybeRefreshProfiles } from './group-profiles.js';
@@ -27,10 +29,14 @@ const GREETING_PREFIXES = [
 
 const IMAGE_REQUEST_TERMS = /\b(image|picture|pic|photo|meme|poster|illustration|drawing|art|avatar|wallpaper|imagem|foto|meme)\b/iu;
 const IMAGE_REQUEST_CUES = /\b(draw|generate|make|create|render|illustrate|paint|show|send|post|desenha|gera|cria|faz|manda|posta|mostra|ilustra|can you|could you|please|pls|quero|queria|pode)\b/iu;
+const VIDEO_REQUEST_TERMS = /\b(video|vídeo|clip|movie|film|animation|animação|animacao|filme)\b/iu;
+const VIDEO_REQUEST_CUES = /\b(generate|make|create|render|animate|show|send|post|gera|cria|faz|manda|posta|mostra|anima|animar|can you|could you|please|pls|quero|queria|pode)\b/iu;
 const MODEL_COMMAND_RE = /(?:^|[\s,!.?:;_-])\/model(?:\s+([^\s]+))?\s*$/iu;
 const AUTO_IMAGE_LONG_REPLY_THRESHOLD = 260;
 const AUTO_IMAGE_COOLDOWN_MS = 60_000;
 const AUTO_IMAGE_BOT_REPLY_GAP = 2;
+const VIDEO_REACTION_ANIMATION_INTERVAL_MS = 2_000;
+const VIDEO_REACTION_ANIMATION_EMOJIS = ['🎬', '🎞️', '📽️', '⏳'];
 
 function parseBotAliases(botName: string): string[] {
   const aliases = botName
@@ -57,6 +63,10 @@ function isPrefixTrigger(text: string, aliases: string[]): boolean {
 
 function isExplicitImageRequest(text: string): boolean {
   return IMAGE_REQUEST_TERMS.test(text) && IMAGE_REQUEST_CUES.test(text);
+}
+
+function isExplicitVideoRequest(text: string): boolean {
+  return VIDEO_REQUEST_TERMS.test(text) && VIDEO_REQUEST_CUES.test(text);
 }
 
 function extractText(msg: { message?: Record<string, any> | null }): string | null {
@@ -286,6 +296,66 @@ async function sendPlainReply(remoteJid: string, text: string, quoted?: any): Pr
   await waitForConnectionWithTimeout(30_000);
   const sendSock = getSocket();
   await sendSock.sendMessage(remoteJid, { text }, quoted ? { quoted } : undefined);
+}
+
+async function sendReaction(remoteJid: string, key: WAMessageKey, emoji: string): Promise<void> {
+  await waitForConnectionWithTimeout(30_000);
+  const sendSock = getSocket();
+  await sendSock.sendMessage(remoteJid, {
+    react: {
+      text: emoji,
+      key,
+    },
+  });
+}
+
+function startReactionAnimation(
+  remoteJid: string,
+  key: WAMessageKey,
+  emojis = VIDEO_REACTION_ANIMATION_EMOJIS,
+  intervalMs = VIDEO_REACTION_ANIMATION_INTERVAL_MS,
+): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let index = 0;
+
+  const tick = async () => {
+    if (stopped) return;
+    const emoji = emojis[index % emojis.length] ?? '🎬';
+    index += 1;
+
+    try {
+      await sendReaction(remoteJid, key, emoji);
+      console.log(`[chat] Updated video generation reaction for ${remoteJid}: ${emoji}`);
+    } catch (err) {
+      console.error(`Failed to update video generation reaction for ${remoteJid}:`, err);
+    }
+
+    if (!stopped) {
+      timer = setTimeout(() => {
+        void tick();
+      }, intervalMs);
+    }
+  };
+
+  void tick();
+
+  return () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+}
+
+async function sendFinalVideoReaction(remoteJid: string, key: WAMessageKey, emoji: string): Promise<void> {
+  await sendReaction(remoteJid, key, emoji);
+  setTimeout(() => {
+    void sendReaction(remoteJid, key, emoji).catch((err) => {
+      console.error(`Failed to reinforce final video reaction for ${remoteJid}:`, err);
+    });
+  }, 1_500);
 }
 
 async function handleModelCommand(
@@ -518,6 +588,97 @@ async function sendGeneratedReply(
   maybeRefreshProfiles(configHolder.current, remoteJid);
 }
 
+async function sendGeneratedVideoReply(
+  configHolder: ConfigHolder,
+  groupConfig: GroupConfig,
+  remoteJid: string,
+  primaryBotName: string,
+  triggerSenderName: string,
+  latestUserText: string,
+  reactionTargetKey: WAMessageKey,
+  quoted?: any,
+): Promise<void> {
+  let generatedVideo: Awaited<ReturnType<typeof generateVideo>> = null;
+  const stopReactionAnimation = startReactionAnimation(remoteJid, reactionTargetKey);
+  try {
+    const response = await generateResponse(configHolder.current, groupConfig, remoteJid, {
+      expectsVideo: true,
+      latestUserText,
+      triggerSenderName,
+    });
+    const resolved = resolveMentions(remoteJid, response.text);
+    const mentions = resolved.mentions;
+    let responseText = sanitizeReplyTextForDelivery(resolved.responseText);
+    if (!responseText) {
+      responseText = 'Aí tens.';
+    }
+
+    const videoPlan = await generateVideoPromptForDirectRequest(
+      configHolder.current,
+      groupConfig,
+      remoteJid,
+      latestUserText,
+      responseText,
+    );
+    if (!videoPlan?.prompt) {
+      throw new Error('Direct video request produced no usable video prompt.');
+    }
+
+    console.log(`[chat] Generating Gemini video for ${remoteJid} with model ${configHolder.current.global.geminiVideoModel}`);
+    console.log(`[chat] Gemini video plan for ${remoteJid}: ${JSON.stringify(videoPlan)}`);
+    const videoStartedAt = Date.now();
+    generatedVideo = await generateVideo(configHolder.current.global, videoPlan.prompt, {
+      aspectRatio: videoPlan.aspectRatio,
+      durationSeconds: videoPlan.durationSeconds,
+      resolution: videoPlan.resolution,
+      personGeneration: videoPlan.personGeneration,
+    });
+    if (!generatedVideo) {
+      throw new Error('Gemini returned no video.');
+    }
+
+    await waitForConnectionWithTimeout(30_000);
+    const sendSock = getSocket();
+    const sent = await sendSock.sendMessage(
+      remoteJid,
+      {
+        video: { url: generatedVideo.filePath },
+        mimetype: generatedVideo.mimeType,
+        caption: responseText,
+        mentions,
+      },
+      quoted ? { quoted } : undefined,
+    );
+    stopReactionAnimation();
+    await sendFinalVideoReaction(remoteJid, reactionTargetKey, '✅');
+    console.log(
+      `[chat] Sent video reply to ${remoteJid} after ${Date.now() - videoStartedAt}ms ` +
+      `messageId=${sent?.key?.id ?? 'unknown'}, caption="${responseText.slice(0, 160)}${responseText.length > 160 ? '...' : ''}"`,
+    );
+
+    addMessage(remoteJid, {
+      senderName: primaryBotName,
+      senderJid: sendSock.user?.id ?? '',
+      text: response.text,
+      fromBot: true,
+      messageId: sent?.key?.id ?? undefined,
+    });
+
+    maybeRefreshProfiles(configHolder.current, remoteJid);
+  } catch (err) {
+    console.error('Failed to generate/send video response:', err);
+    stopReactionAnimation();
+    try {
+      await sendFinalVideoReaction(remoteJid, reactionTargetKey, '❌');
+    } catch (reactionErr) {
+      console.error(`Failed to send video failure reaction to ${remoteJid}:`, reactionErr);
+    }
+  } finally {
+    stopReactionAnimation();
+    await cleanupGeneratedVideo(generatedVideo);
+  }
+}
+
 async function sendRateLimitWarning(remoteJid: string, text: string, quoted?: any): Promise<void> {
   await waitForConnectionWithTimeout(30_000);
   const sendSock = getSocket();
@@ -656,6 +817,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (!mentionTriggered && !prefixTriggered && !replyTriggered) continue;
         const explicitImageRequest = isExplicitImageRequest(text);
+        const explicitVideoRequest = isExplicitVideoRequest(text);
         const modelCommand = parseModelCommand(text);
 
         if (modelCommand) {
@@ -687,6 +849,23 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         if (msg.key.id) trackTriggered(msg.key.id);
         console.log(`Chat triggered by ${senderName}: ${text}`);
         console.log(`[chat] Rate limit admitted for ${remoteJid}: ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
+
+        const canGenerateDirectVideos = !!configHolder.current.global.geminiApiKey
+          && groupConfig.chatbot?.enableVideoGeneration === true;
+        if (explicitVideoRequest && canGenerateDirectVideos) {
+          console.log(`[chat] Video generation triggered by ${senderName}: ${text}`);
+          void sendGeneratedVideoReply(
+            configHolder,
+            groupConfig,
+            remoteJid,
+            primaryBotName,
+            senderName,
+            text,
+            msg.key,
+            msg,
+          );
+          continue;
+        }
 
         withGroupLock(remoteJid, async () => {
           try {
@@ -751,6 +930,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
 
         if (!mentionTriggered && !prefixTriggered) continue;
         const explicitImageRequest = isExplicitImageRequest(text);
+        const explicitVideoRequest = isExplicitVideoRequest(text);
         const modelCommand = parseModelCommand(text);
 
         if (modelCommand) {
@@ -784,6 +964,22 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         const triggerSenderName = senderJid;
         console.log(`[chat] Edit triggered by ${senderJid}: ${text}`);
         console.log(`[chat] Rate limit admitted for ${remoteJid} (edit): ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
+
+        const canGenerateDirectVideos = !!configHolder.current.global.geminiApiKey
+          && groupConfig.chatbot?.enableVideoGeneration === true;
+        if (explicitVideoRequest && canGenerateDirectVideos) {
+          console.log(`[chat] Video generation triggered by edit ${senderJid}: ${text}`);
+          void sendGeneratedVideoReply(
+            configHolder,
+            groupConfig,
+            remoteJid,
+            primaryBotName,
+            triggerSenderName,
+            text,
+            update.key,
+          );
+          continue;
+        }
 
         withGroupLock(remoteJid, async () => {
           try {

@@ -327,6 +327,17 @@ export async function sendGroupImageMessage(
   await sock.sendMessage(groupJid, { image, mimetype: mimeType, caption });
 }
 
+export async function sendGroupVideoMessage(
+  groupJid: string,
+  filePath: string,
+  mimeType: string,
+  caption: string,
+): Promise<void> {
+  await waitForConnection();
+  const sock = getSocket();
+  await sock.sendMessage(groupJid, { video: { url: filePath }, mimetype: mimeType, caption });
+}
+
 export async function listGroups(): Promise<Record<string, string>> {
   await waitForConnection();
   const sock = getSocket();

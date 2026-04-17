@@ -10,6 +10,7 @@ let client: Anthropic | null = null;
 
 type ResponseGenerationOptions = {
   expectsImage?: boolean;
+  expectsVideo?: boolean;
   latestUserText?: string;
   triggerSenderName?: string;
 };
@@ -32,6 +33,14 @@ export type GeneratedImagePlan = {
   literalness?: ImageLiteralness;
 };
 
+export type GeneratedVideoPlan = {
+  prompt?: string;
+  aspectRatio?: '16:9' | '9:16';
+  durationSeconds?: 4 | 6 | 8;
+  resolution?: '720p' | '1080p' | '4k';
+  personGeneration?: 'allow_all' | 'allow_adult' | 'dont_allow';
+};
+
 type JsonImageDecision = {
   shouldGenerate?: boolean;
   image?: GeneratedImagePlan;
@@ -40,6 +49,11 @@ type JsonImageDecision = {
 type JsonScheduledPost = {
   caption?: string;
   image?: GeneratedImagePlan;
+};
+
+type JsonManualVideoPost = {
+  caption?: string;
+  video?: GeneratedVideoPlan;
 };
 
 type GoogleGenerateContentResponse = {
@@ -285,9 +299,10 @@ function buildReactionVarietyInstruction(groupJid: string): string {
   return lines.join('\n');
 }
 
-function buildReplyPromptBlocks(groupJid: string, expectsImage: boolean): string[] {
-  return (expectsImage
-    ? [
+function buildReplyPromptBlocks(groupJid: string, options: { expectsImage?: boolean; expectsVideo?: boolean }): string[] {
+  const mediaBlocks = [
+    ...(options.expectsImage
+      ? [
         [
           'The user explicitly asked for an image and you can accompany this reply with one.',
           'Write a short caption or companion line that works naturally alongside an image.',
@@ -297,8 +312,21 @@ function buildReplyPromptBlocks(groupJid: string, expectsImage: boolean): string
           'Do not include bracketed image descriptions such as [Imagem: ...], [Image: ...], or similar prompt annotations.',
         ].join('\n'),
       ]
-    : []
-  ).concat([
+      : []),
+    ...(options.expectsVideo
+      ? [
+        [
+          'The user explicitly asked for a video and you can accompany this reply with one.',
+          'Write a short caption or companion line that works naturally alongside a generated video.',
+          'Do not claim you cannot generate videos.',
+          'Do not output markdown video syntax, video URLs, or external video links.',
+          'Do not include bracketed video descriptions such as [Video: ...], [Vídeo: ...], or similar prompt annotations.',
+        ].join('\n'),
+      ]
+      : []),
+  ];
+
+  return mediaBlocks.concat([
     [
       'Return only the final user-visible reply.',
       'Never reveal reasoning, analysis, notes, options, drafts, translations, constraints, character counts, or self-evaluation.',
@@ -808,6 +836,34 @@ function parseImagePlan(value: unknown, defaults?: {
   };
 }
 
+function parseVideoPlan(value: unknown): GeneratedVideoPlan | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : '';
+  if (!prompt) return null;
+
+  const durationSeconds = raw.durationSeconds === 4 || raw.durationSeconds === 6 || raw.durationSeconds === 8
+    ? raw.durationSeconds
+    : 4;
+  const resolution = raw.resolution === '720p' || raw.resolution === '1080p' || raw.resolution === '4k'
+    ? raw.resolution
+    : '720p';
+  const aspectRatio = raw.aspectRatio === '16:9' || raw.aspectRatio === '9:16'
+    ? raw.aspectRatio
+    : '9:16';
+  const personGeneration = raw.personGeneration === 'allow_all' || raw.personGeneration === 'allow_adult' || raw.personGeneration === 'dont_allow'
+    ? raw.personGeneration
+    : 'allow_all';
+
+  return {
+    prompt,
+    aspectRatio,
+    durationSeconds,
+    resolution,
+    personGeneration,
+  };
+}
+
 function extractLooseImagePlan(responseText: string, defaults?: {
   literalness?: ImageLiteralness;
   textInImage?: ImageTextPolicy;
@@ -936,7 +992,10 @@ export async function generateResponse(
   const chatbot = groupConfig.chatbot!;
   const chatModel = resolveGroupChatModel(config.global, groupConfig);
   const dynamicStyle = buildDynamicStyleInstruction(groupConfig);
-  const promptBlocks = buildReplyPromptBlocks(groupJid, options.expectsImage === true);
+  const promptBlocks = buildReplyPromptBlocks(groupJid, {
+    expectsImage: options.expectsImage === true,
+    expectsVideo: options.expectsVideo === true,
+  });
   const systemPrompt = buildSystemPrompt(
     groupConfig,
     groupJid,
@@ -1053,6 +1112,51 @@ export async function generateImagePromptForDirectRequest(
   );
 }
 
+export async function generateVideoPromptForDirectRequest(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  latestUserText: string,
+  replyText: string,
+): Promise<GeneratedVideoPlan | null> {
+  const responseText = await runPlanningPrompt(
+    config,
+    groupConfig,
+    groupJid,
+    [
+      'You are preparing a video-generation prompt for a companion video.',
+      'The user directly asked for a video.',
+      'Return JSON only with the shape {"prompt":"...","aspectRatio":"9:16|16:9","durationSeconds":4|6|8,"resolution":"720p|1080p|4k","personGeneration":"allow_all|allow_adult|dont_allow"}',
+      'Write a single self-contained prompt suitable for Google Veo video generation.',
+      'Keep the video prompt compact: ideally under 110 words.',
+      'Include motion, action, camera movement, visual style, ambiance, and optional audio cues when useful.',
+      'Default to aspectRatio="9:16", durationSeconds=4, resolution="720p", and personGeneration="allow_all".',
+      'Use 720p unless the user explicitly asks for higher resolution.',
+      'Use 4 seconds unless the user explicitly asks for a longer clip.',
+      'Prefer prompts in English unless the user explicitly asks for another language in the video.',
+      'Avoid asking for readable text, captions, subtitles, signs, UI, or title cards unless explicitly requested.',
+      'The bot reply itself must stay as plain text only, never markdown video syntax or video URLs.',
+      'If the request is unsafe or you cannot infer a good video, return {"prompt":""}.',
+    ].join('\n'),
+    [
+      `Latest user message:\n${latestUserText}`,
+      `Planned bot reply/caption:\n${replyText}`,
+      'Return the JSON now.',
+    ].join('\n\n'),
+    IMAGE_PLAN_MAX_TOKENS,
+  );
+
+  const parsed = parseJsonResponse<GeneratedVideoPlan>(responseText);
+  const plan = parseVideoPlan(parsed);
+  if (plan) {
+    return plan;
+  }
+
+  console.warn(`[llm] Direct video planner for "${groupConfig.name ?? groupJid}" returned no usable video plan.`);
+  console.warn(`[llm] Direct video planner for "${groupConfig.name ?? groupJid}" raw response preview: ${responseText.slice(0, 500)}`);
+  return null;
+}
+
 export async function decideImageForReply(
   config: AppConfig,
   groupConfig: GroupConfig,
@@ -1148,6 +1252,121 @@ export async function generateImagePromptForReply(
     `Reply image planner for "${groupConfig.name ?? groupJid}"`,
     { literalness: 'balanced', textInImage: 'none' },
   );
+}
+
+export async function generateManualImagePost(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  prompt: string,
+): Promise<{ caption: string; image: GeneratedImagePlan | null }> {
+  const anthropic = getClient(config.global.anthropicApiKey);
+  const systemPrompt = buildSystemPrompt(
+    groupConfig,
+    groupJid,
+    [
+      'You are creating a manual WhatsApp group post requested from the web interface.',
+      'Return JSON only with the shape {"caption":"...","image":{"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}}',
+      'Use the group persona, style, and recent context where relevant.',
+      'The caption should read like a natural standalone group post from the bot, not an explanation of the prompt or admin request.',
+      'The image plan should be a self-contained visual brief that reflects the caption and requested idea.',
+      'Default to literalness="balanced". Use literalness="vibe" when mood matters more than exact details.',
+      'Default to textInImage="none". Avoid readable text, signs, posters, headlines, subtitles, chat bubbles, UI, and typography unless the prompt explicitly asks for them.',
+      'Do not add markdown image syntax, URLs, or explanatory notes.',
+      'If no good image is appropriate, still provide a sensible image prompt that matches the caption.',
+    ],
+    { includeDynamicStyle: false },
+  );
+
+  const response = await Promise.race([
+    anthropic.messages.create({
+      model: config.global.claudeModel,
+      max_tokens: Math.max(config.global.claudeMaxTokens, 1400),
+      system: systemPrompt,
+      messages: [
+        ...toAnthropicMessages(groupJid),
+        {
+          role: 'user',
+          content: [
+            `Manual web image prompt:\n${prompt}`,
+            'Return the JSON now.',
+          ].join('\n\n'),
+        },
+      ],
+    } as any),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Manual image post LLM request timed out after 2 minutes')), 120_000),
+    ),
+  ]);
+
+  const responseText = extractTextResponse(response).trim();
+  const parsed = parseJsonResponse<JsonScheduledPost>(responseText);
+  const caption = parsed?.caption?.trim() || '';
+  const image = parseImagePlan(parsed?.image, { literalness: 'balanced', textInImage: 'none' });
+  if (!caption) {
+    throw new Error(`Manual image post generation returned invalid JSON or empty caption: ${responseText.slice(0, 400)}`);
+  }
+
+  return { caption, image };
+}
+
+export async function generateManualVideoPost(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  prompt: string,
+): Promise<{ caption: string; video: GeneratedVideoPlan | null }> {
+  const anthropic = getClient(config.global.anthropicApiKey);
+  const systemPrompt = buildSystemPrompt(
+    groupConfig,
+    groupJid,
+    [
+      'You are creating a manual WhatsApp group post with a generated video requested from the web interface.',
+      'Return JSON only with the shape {"caption":"...","video":{"prompt":"...","aspectRatio":"9:16|16:9","durationSeconds":4|6|8,"resolution":"720p|1080p|4k","personGeneration":"allow_all|allow_adult|dont_allow"}}',
+      'Use the group persona, style, and recent context where relevant.',
+      'The caption should read like a natural standalone group post from the bot, not an explanation of the prompt or admin request.',
+      'The video prompt should be a self-contained brief for Google Veo video generation.',
+      'Include motion, action, camera movement, visual style, ambiance, and optional audio cues when useful.',
+      'Default to aspectRatio="9:16", durationSeconds=4, resolution="720p", and personGeneration="allow_all".',
+      'Use 720p unless the prompt explicitly asks for higher resolution.',
+      'Use 4 seconds unless the prompt explicitly asks for a longer clip.',
+      'Avoid readable text, captions, subtitles, signs, UI, or title cards unless explicitly requested.',
+      'Do not add markdown video syntax, URLs, or explanatory notes.',
+      'If no good video is appropriate, return an empty video prompt.',
+    ],
+    { includeDynamicStyle: false },
+  );
+
+  const response = await Promise.race([
+    anthropic.messages.create({
+      model: config.global.claudeModel,
+      max_tokens: Math.max(config.global.claudeMaxTokens, 1400),
+      system: systemPrompt,
+      messages: [
+        ...toAnthropicMessages(groupJid),
+        {
+          role: 'user',
+          content: [
+            `Manual web video prompt:\n${prompt}`,
+            'Return the JSON now.',
+          ].join('\n\n'),
+        },
+      ],
+    } as any),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Manual video post LLM request timed out after 2 minutes')), 120_000),
+    ),
+  ]);
+
+  const responseText = extractTextResponse(response).trim();
+  const parsed = parseJsonResponse<JsonManualVideoPost>(responseText);
+  const caption = parsed?.caption?.trim() || '';
+  const video = parseVideoPlan(parsed?.video);
+  if (!caption) {
+    throw new Error(`Manual video post generation returned invalid JSON or empty caption: ${responseText.slice(0, 400)}`);
+  }
+
+  return { caption, video };
 }
 
 export async function generateScheduledImagePost(

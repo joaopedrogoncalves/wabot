@@ -1,6 +1,19 @@
 import type { AppConfig, ChatModelConfig, GlobalConfig, GroupConfig, ScheduledPostJobConfig } from '../config.js';
 import { getAllowedChatModels, resolveGroupChatModel } from '../config.js';
 
+export type ManualActionJobView = {
+  id: string;
+  action: 'send-message' | 'generate-image' | 'generate-video';
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  stage: string;
+  promptPreview: string;
+  result?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+};
+
 function esc(str: string): string {
   return str
     .replace(/&/g, '&amp;')
@@ -48,6 +61,8 @@ function renderLayout(title: string, bodyHtml: string): string {
   .badge { display: inline-block; padding: .15rem .5rem; border-radius: 10px; font-size: .75rem; font-weight: 600; }
   .badge-green { background: #d4edda; color: #155724; }
   .badge-gray { background: #e2e3e5; color: #383d41; }
+  .badge-blue { background: #d1ecf1; color: #0c5460; }
+  .badge-red { background: #f8d7da; color: #721c24; }
   .flash { padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
   .flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
   .flash-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
@@ -66,7 +81,16 @@ function renderLayout(title: string, bodyHtml: string): string {
   .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
   .field-grid > div label:first-child { margin-top: 0; }
   .textarea-compact { min-height: 140px; }
+  .textarea-short { min-height: 110px; }
   .empty-state { padding: 1rem; border: 1px dashed #bbb; border-radius: 8px; background: #fafafa; color: #666; }
+  .action-section { border-top: 1px solid #eee; margin-top: 1.25rem; padding-top: 1rem; }
+  .action-section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+  .manual-job-list { display: flex; flex-direction: column; gap: .75rem; margin-top: .75rem; }
+  .manual-job { border: 1px solid #ddd; border-radius: 8px; padding: .85rem; background: #fafafa; }
+  .manual-job-header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+  .manual-job-title { font-weight: 600; }
+  .manual-job p { margin: .35rem 0 0; }
+  .manual-job code { overflow-wrap: anywhere; white-space: normal; }
 </style>
 </head>
 <body>
@@ -240,6 +264,103 @@ function renderScheduledPostsEditor(group: GroupConfig, editorId: string): strin
     </script>`;
 }
 
+function getManualActionLabel(action: ManualActionJobView['action']): string {
+  if (action === 'send-message') return 'Message';
+  if (action === 'generate-image') return 'Image';
+  return 'Video';
+}
+
+function getManualStatusBadge(job: ManualActionJobView): string {
+  if (job.status === 'succeeded') return '<span class="badge badge-green">sent</span>';
+  if (job.status === 'failed') return '<span class="badge badge-red">failed</span>';
+  if (job.status === 'queued') return '<span class="badge badge-gray">queued</span>';
+  return '<span class="badge badge-blue">running</span>';
+}
+
+function formatTimestamp(timestamp: number | undefined): string {
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleString();
+}
+
+function renderManualJobStatus(jobs: ManualActionJobView[]): string {
+  const hasActiveJob = jobs.some((job) => job.status === 'queued' || job.status === 'running');
+  const jobRows = jobs.length === 0
+    ? '<div class="empty-state">No manual posts have run since the last restart.</div>'
+    : `<div class="manual-job-list">${jobs.map((job) => {
+      const finalLine = job.status === 'failed' && job.error
+        ? `<p class="flash flash-error" style="margin-top:.5rem;padding:.6rem">${esc(job.error)}</p>`
+        : job.result
+          ? `<p class="muted">${esc(job.result)}</p>`
+          : '';
+      return `<div class="manual-job">
+        <div class="manual-job-header">
+          <span class="manual-job-title">${esc(getManualActionLabel(job.action))} post</span>
+          ${getManualStatusBadge(job)}
+        </div>
+        <p>${esc(job.stage)}</p>
+        <p class="muted">Started ${esc(formatTimestamp(job.createdAt))}${job.completedAt ? `; finished ${esc(formatTimestamp(job.completedAt))}` : ''}</p>
+        <p class="muted"><code>${esc(job.promptPreview)}</code></p>
+        ${finalLine}
+      </div>`;
+    }).join('')}</div>`;
+
+  return `<div class="action-section">
+    <h3 style="margin:0 0 .5rem">Manual Post Status</h3>
+    <p class="muted">This shows recent manual posts for this group. Status resets when the bot restarts.</p>
+    ${jobRows}
+    ${hasActiveJob ? `<p class="muted">Refreshing while work is active.</p>
+    <script>
+      (() => {
+        setTimeout(() => {
+          const active = document.activeElement;
+          const tag = active?.tagName?.toLowerCase();
+          if (tag === 'textarea' || tag === 'input' || tag === 'select') return;
+          window.location.reload();
+        }, 5000);
+      })();
+    </script>` : ''}
+  </div>`;
+}
+
+function renderManualGroupActions(actionUrl: string, jobs: ManualActionJobView[] = []): string {
+  return `<div class="card">
+    <h2>Post To Group</h2>
+    <p class="muted">Send an exact message, or give the bot a prompt and let it generate an image or video post in this group persona.</p>
+
+    ${renderManualJobStatus(jobs)}
+
+    <div class="action-section">
+      <form method="POST" action="${esc(actionUrl)}">
+        <input type="hidden" name="action" value="send-message">
+        <label>Send exact message</label>
+        <textarea class="textarea-short" name="text" maxlength="4000" placeholder="Write the message to send as the bot."></textarea>
+        <br><br>
+        <button type="submit" class="btn btn-primary">Send Message</button>
+      </form>
+    </div>
+
+    <div class="action-section">
+      <form method="POST" action="${esc(actionUrl)}">
+        <input type="hidden" name="action" value="generate-image">
+        <label>Generate image post</label>
+        <textarea class="textarea-short" name="prompt" maxlength="5000" placeholder="Describe the image post you want. The bot will write the caption and visual prompt in the group persona."></textarea>
+        <br><br>
+        <button type="submit" class="btn btn-primary">Generate Image</button>
+      </form>
+    </div>
+
+    <div class="action-section">
+      <form method="POST" action="${esc(actionUrl)}">
+        <input type="hidden" name="action" value="generate-video">
+        <label>Generate video post</label>
+        <textarea class="textarea-short" name="prompt" maxlength="5000" placeholder="Describe the video post you want. The bot will write the caption and Veo prompt in the group persona."></textarea>
+        <p class="muted">Video generation runs in the background and posts when ready.</p>
+        <button type="submit" class="btn btn-primary">Generate Video</button>
+      </form>
+    </div>
+  </div>`;
+}
+
 export function renderAdminDashboard(config: AppConfig, adminToken: string): string {
   const rows = config.groups.map((g) => {
     const name = esc(g.name ?? g.jid);
@@ -304,6 +425,9 @@ export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): st
         <label>Gemini Image Model</label>
         <input type="text" name="geminiImageModel" value="${esc(g.geminiImageModel)}">
 
+        <label>Gemini Video Model</label>
+        <input type="text" name="geminiVideoModel" value="${esc(g.geminiVideoModel)}">
+
         <label>Chat Max Output Tokens</label>
         <input type="number" name="chatMaxOutputTokens" value="${g.chatMaxOutputTokens}" min="1">
 
@@ -334,7 +458,13 @@ export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): st
   return renderLayout('Global Settings', body);
 }
 
-export function renderAdminGroupEdit(config: AppConfig, group: GroupConfig, adminToken: string, baseUrl: string): string {
+export function renderAdminGroupEdit(
+  config: AppConfig,
+  group: GroupConfig,
+  adminToken: string,
+  baseUrl: string,
+  manualJobs: ManualActionJobView[] = [],
+): string {
   const chatbot = group.chatbot;
   const events = group.events;
   const groupUrl = group.webToken ? `${baseUrl}/group/${group.webToken}` : '';
@@ -352,6 +482,8 @@ export function renderAdminGroupEdit(config: AppConfig, group: GroupConfig, admi
         <button type="submit" class="btn btn-danger" onclick="return confirm('Regenerate token? The old link will stop working.')">Regenerate Token</button>
       </form>
     </div>` : ''}
+
+    ${renderManualGroupActions(`/admin/group/${encodeURIComponent(group.jid)}/action?token=${adminToken}`, manualJobs)}
 
     <div class="card">
       <h2>Chatbot Settings</h2>
@@ -406,6 +538,11 @@ export function renderAdminGroupEdit(config: AppConfig, group: GroupConfig, admi
         </div>
 
         <div class="checkbox-row">
+          <input type="checkbox" id="enableVideoGeneration" name="enableVideoGeneration" value="1" ${chatbot?.enableVideoGeneration !== false ? 'checked' : ''}>
+          <label for="enableVideoGeneration">Allow video generation on direct requests</label>
+        </div>
+
+        <div class="checkbox-row">
           <input type="checkbox" id="enableAutoImageReplies" name="enableAutoImageReplies" value="1" ${chatbot?.enableAutoImageReplies ? 'checked' : ''}>
           <label for="enableAutoImageReplies">Allow automatic image replies</label>
         </div>
@@ -440,14 +577,22 @@ export function renderAdminGroupEdit(config: AppConfig, group: GroupConfig, admi
   return renderLayout(`Edit ${group.name ?? group.jid}`, body);
 }
 
-export function renderGroupEdit(config: AppConfig, group: GroupConfig, saved?: boolean): string {
+export function renderGroupEdit(
+  config: AppConfig,
+  group: GroupConfig,
+  saved?: boolean,
+  manualJobs: ManualActionJobView[] = [],
+): string {
   const chatbot = group.chatbot;
   const allowedModels = chatbot ? getAllowedChatModels(config.global, group) : [];
   const activeModel = chatbot ? resolveGroupChatModel(config.global, group) : null;
+  const actionUrl = group.webToken ? `/group/${group.webToken}/action` : '';
   const body = `
     <h1>${esc(group.name ?? group.jid)} - Chatbot Settings</h1>
 
     ${saved ? '<div class="flash flash-success">Settings saved successfully.</div>' : ''}
+
+    ${actionUrl ? renderManualGroupActions(actionUrl, manualJobs) : ''}
 
     <div class="card">
       <form method="POST">
@@ -493,6 +638,11 @@ export function renderGroupEdit(config: AppConfig, group: GroupConfig, saved?: b
         <div class="checkbox-row">
           <input type="checkbox" id="enableImageGeneration" name="enableImageGeneration" value="1" ${chatbot?.enableImageGeneration !== false ? 'checked' : ''}>
           <label for="enableImageGeneration">Allow image generation on direct requests</label>
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableVideoGeneration" name="enableVideoGeneration" value="1" ${chatbot?.enableVideoGeneration !== false ? 'checked' : ''}>
+          <label for="enableVideoGeneration">Allow video generation on direct requests</label>
         </div>
 
         <div class="checkbox-row">

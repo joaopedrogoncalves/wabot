@@ -54,6 +54,7 @@ export interface GlobalConfig {
   claudeMaxTokens: number;
   chatMaxOutputTokens: number;
   geminiImageModel: string;
+  geminiVideoModel: string;
   chatModels: ChatModelConfig[];
   defaultChatModelId: string;
 }
@@ -82,6 +83,7 @@ export interface ChatbotGroupConfig {
   responseRateLimitWindowSec?: number;
   responseRateLimitWarn?: boolean;
   enableImageGeneration?: boolean;
+  enableVideoGeneration?: boolean;
   enableAutoImageReplies?: boolean;
 }
 
@@ -222,6 +224,7 @@ export function loadAppConfig(): AppConfig {
     chatMaxOutputTokens: globalJson.chatMaxOutputTokens ?? globalJson.claudeMaxTokens ?? 1024,
     geminiApiKey: geminiApiKey || undefined,
     geminiImageModel: globalJson.geminiImageModel ?? 'gemini-3.1-flash-image-preview',
+    geminiVideoModel: globalJson.geminiVideoModel ?? 'veo-3.1-fast-generate-preview',
     chatModels,
     defaultChatModelId: '',
   };
@@ -315,6 +318,7 @@ export function loadAppConfig(): AppConfig {
         responseRateLimitWindowSec: clampInteger(g.chatbot.responseRateLimitWindowSec, 60, 1),
         responseRateLimitWarn: g.chatbot.responseRateLimitWarn ?? true,
         enableImageGeneration: g.chatbot.enableImageGeneration ?? true,
+        enableVideoGeneration: g.chatbot.enableVideoGeneration ?? true,
         enableAutoImageReplies: g.chatbot.enableAutoImageReplies ?? false,
       };
     }

@@ -65,8 +65,8 @@ Configuration is split between environment variables (`.env`) for secrets and a 
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | For enabled chatbot groups | Anthropic API key used for text replies and profile summarization |
-| `GEMINI_API_KEY` | No | Enables Gemini image generation for direct image requests and automatic image replies |
+| `ANTHROPIC_API_KEY` | For enabled chatbot groups | Anthropic API key used for text replies, media post planning, and profile summarization |
+| `GEMINI_API_KEY` | No | Enables Gemini image generation and Veo video generation |
 | `TWITTER_BEARER_TOKEN` | No | X/Twitter API bearer token used to enrich `twitter.com` / `x.com` links with tweet text and metrics |
 | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | For groups with `events` | Google service account email |
 | `GOOGLE_PRIVATE_KEY` | For groups with `events` | Google service account private key |
@@ -86,6 +86,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
     "claudeMaxTokens": 1024,
     "chatMaxOutputTokens": 1024,
     "geminiImageModel": "gemini-3.1-flash-image-preview",
+    "geminiVideoModel": "veo-3.1-fast-generate-preview",
     "defaultChatModelId": "1a",
     "chatModels": [
       {
@@ -144,6 +145,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
         "responseRateLimitWindowSec": 60,
         "responseRateLimitWarn": true,
         "enableImageGeneration": true,
+        "enableVideoGeneration": true,
         "enableAutoImageReplies": false
       },
       "scheduledPosts": [
@@ -182,6 +184,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
 | `claudeMaxTokens` | `1024` | Legacy Anthropic output cap used by existing Anthropic-only flows |
 | `chatMaxOutputTokens` | `1024` | Max output tokens for normal chatbot replies across all chat providers |
 | `geminiImageModel` | `gemini-3.1-flash-image-preview` | Gemini model used for image generation |
+| `geminiVideoModel` | `veo-3.1-fast-generate-preview` | Veo model used for explicit video requests |
 | `defaultChatModelId` | first configured `chatModels` entry | Default group reply model id |
 | `chatModels` | built-in catalog | Global catalog of selectable chat reply models, including per-model capability flags such as web search and explicit thinking controls |
 
@@ -274,6 +277,7 @@ The allowlist and default are chosen by admins in config or the admin web UI. Th
 | `responseRateLimitWindowSec` | `60` | Rate limit window size in seconds |
 | `responseRateLimitWarn` | `true` | Send one in-character cooldown warning when the limit is hit |
 | `enableImageGeneration` | `true` | Allow Gemini images for explicit image requests |
+| `enableVideoGeneration` | `true` | Allow Veo videos for explicit video requests |
 | `enableAutoImageReplies` | `false` | Allow the bot to occasionally attach images to normal replies |
 
 If a user message contains `twitter.com`/`x.com` tweet URLs, the bot tries to fetch tweet details through the X API and appends that context to the text sent to the selected reply model. Set `TWITTER_BEARER_TOKEN` to enable this.
@@ -298,11 +302,12 @@ Scheduled posts let a group publish an autonomous image+caption message without 
 
 If Gemini image generation fails for a scheduled job, the bot falls back to posting the caption as plain text.
 
-### Image generation
+### Image and video generation
 
-If `GEMINI_API_KEY` is set, the chatbot can attach Gemini-generated images:
+If `GEMINI_API_KEY` is set, the chatbot can attach Gemini-generated images and Veo-generated videos:
 
 - `enableImageGeneration`: handles direct requests such as "bot, make a meme about this"
+- `enableVideoGeneration`: handles direct requests such as "bot, make a short video about this"; the bot reacts to the request while Veo runs, then sends the MP4 when it is ready
 - `enableAutoImageReplies`: lets the bot decide when an image would improve a reply, with a cooldown between auto-generated images
 
 If Gemini is not configured, the chatbot still replies in text.
@@ -313,8 +318,16 @@ If `ADMIN_TOKEN` is set, the bot starts an Express server at `http://localhost:W
 
 - `/admin` shows all known groups and links to group editors
 - `/admin/global` edits `global` config fields stored in `groups.json`
-- `/admin/group/:jid` edits chatbot, per-group model allowlists/defaults, events, and scheduled-post settings for a group and can regenerate its `webToken`
-- `/group/:webToken` is a shareable per-group settings page for that group's chatbot, event, and scheduled-post settings
+- `/admin/group/:jid` edits chatbot, per-group model allowlists/defaults, events, and scheduled-post settings for a group, can regenerate its `webToken`, and can send manual group posts
+- `/group/:webToken` is a shareable per-group page for that group's chatbot, event, scheduled-post, and manual posting controls
+
+The group pages include a "Post To Group" panel:
+
+- Send exact message: posts the entered text as the bot without rewriting it
+- Generate image post: drafts a persona-aware caption and image prompt, generates the image, then posts it to the group
+- Generate video post: drafts a persona-aware caption and Veo prompt, starts video generation in the background, then posts the MP4 when ready
+
+The same panel shows recent manual post status for the group, including active generation stages, sent confirmations, and failures. This status is kept in memory and resets when the bot restarts.
 
 Saving event or scheduled-post settings in the web UI immediately rebuilds the live cron schedule; a bot restart is not required for those edits to take effect.
 

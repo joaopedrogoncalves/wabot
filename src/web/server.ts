@@ -1,8 +1,13 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import { randomUUID } from 'crypto';
 import type { ConfigHolder } from '../config.js';
+import type { GroupConfig } from '../config.js';
 import { updateConfigFile } from '../config.js';
 import { startEventCrons, startScheduledPostCrons } from '../cron.js';
+import { generateImage } from '../gemini.js';
+import { cleanupGeneratedVideo, generateVideo } from '../gemini-video.js';
+import { generateManualImagePost, generateManualVideoPost } from '../llm.js';
+import { sendGroupImageMessage, sendGroupMessage, sendGroupVideoMessage } from '../whatsapp.js';
 import {
   renderAdminDashboard,
   renderAdminGlobalEdit,
@@ -10,7 +15,20 @@ import {
   renderGroupEdit,
   renderSuccess,
   renderError,
+  type ManualActionJobView,
 } from './templates.js';
+
+type ManualGroupAction = 'send-message' | 'generate-image' | 'generate-video';
+type ManualActionJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+type ManualActionJob = ManualActionJobView & {
+  groupJid: string;
+};
+
+const MANUAL_ACTION_TEXT_MAX_CHARS = 4_000;
+const MANUAL_ACTION_PROMPT_MAX_CHARS = 5_000;
+const MANUAL_ACTION_HISTORY_LIMIT = 12;
+
+const manualActionJobsByGroup = new Map<string, ManualActionJob[]>();
 
 function getTrimmedString(rawValue: unknown): string {
   return typeof rawValue === 'string' ? rawValue.trim() : '';
@@ -101,6 +119,254 @@ function parseSelectedModelIds(rawValue: unknown): string[] {
   return single ? [single] : [];
 }
 
+function parseManualGroupAction(rawValue: unknown): ManualGroupAction {
+  const action = getTrimmedString(rawValue);
+  if (action === 'send-message' || action === 'generate-image' || action === 'generate-video') {
+    return action;
+  }
+  throw new Error('Invalid group action.');
+}
+
+function getRequiredText(rawValue: unknown, fieldName: string, maxChars: number): string {
+  const text = getTrimmedString(rawValue);
+  if (!text) {
+    throw new Error(`${fieldName} is required.`);
+  }
+  if (text.length > maxChars) {
+    throw new Error(`${fieldName} must be ${maxChars} characters or fewer.`);
+  }
+  return text;
+}
+
+function findFreshGroup(configHolder: ConfigHolder, groupJid: string): GroupConfig {
+  const group = configHolder.current.groups.find((entry) => entry.jid === groupJid);
+  if (!group) {
+    throw new Error(`Group ${groupJid} is no longer configured.`);
+  }
+  return group;
+}
+
+function buildPromptPreview(text: string): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  return compact.length <= 180 ? compact : `${compact.slice(0, 177).trimEnd()}...`;
+}
+
+function createManualActionJob(groupJid: string, action: ManualGroupAction, prompt: string): ManualActionJob {
+  const now = Date.now();
+  const job: ManualActionJob = {
+    id: randomUUID(),
+    groupJid,
+    action,
+    status: 'queued',
+    stage: action === 'send-message' ? 'Waiting to send message.' : 'Waiting to start generation.',
+    promptPreview: buildPromptPreview(prompt),
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const jobs = manualActionJobsByGroup.get(groupJid) ?? [];
+  jobs.unshift(job);
+  if (jobs.length > MANUAL_ACTION_HISTORY_LIMIT) {
+    jobs.splice(MANUAL_ACTION_HISTORY_LIMIT);
+  }
+  manualActionJobsByGroup.set(groupJid, jobs);
+  return job;
+}
+
+function updateManualActionJob(
+  groupJid: string,
+  jobId: string,
+  patch: Partial<Omit<ManualActionJob, 'id' | 'groupJid' | 'action' | 'createdAt'>>,
+): void {
+  const job = manualActionJobsByGroup.get(groupJid)?.find((entry) => entry.id === jobId);
+  if (!job) return;
+  Object.assign(job, patch, { updatedAt: Date.now() });
+}
+
+function finishManualActionJob(
+  groupJid: string,
+  jobId: string,
+  status: Extract<ManualActionJobStatus, 'succeeded' | 'failed'>,
+  patch: Partial<Pick<ManualActionJob, 'stage' | 'result' | 'error'>>,
+): void {
+  updateManualActionJob(groupJid, jobId, {
+    ...patch,
+    status,
+    completedAt: Date.now(),
+  });
+}
+
+function getManualActionJobsForGroup(groupJid: string): ManualActionJobView[] {
+  return (manualActionJobsByGroup.get(groupJid) ?? []).map((job) => ({
+    id: job.id,
+    action: job.action,
+    status: job.status,
+    stage: job.stage,
+    promptPreview: job.promptPreview,
+    result: job.result,
+    error: job.error,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    completedAt: job.completedAt,
+  }));
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function runManualTextAction(configHolder: ConfigHolder, groupJid: string, text: string, jobId: string): Promise<void> {
+  const group = findFreshGroup(configHolder, groupJid);
+  updateManualActionJob(groupJid, jobId, {
+    status: 'running',
+    stage: 'Sending message to WhatsApp.',
+  });
+  await sendGroupMessage(group.jid, text);
+  finishManualActionJob(groupJid, jobId, 'succeeded', {
+    stage: 'Message sent.',
+    result: 'Posted exact message to the group.',
+  });
+}
+
+async function runManualImageAction(configHolder: ConfigHolder, groupJid: string, prompt: string, jobId: string): Promise<void> {
+  const group = findFreshGroup(configHolder, groupJid);
+  const config = configHolder.current;
+  const groupLabel = group.name ?? group.jid;
+  console.log(`[web-action] Generating manual image post for "${groupLabel}" promptChars=${prompt.length}`);
+  updateManualActionJob(groupJid, jobId, {
+    status: 'running',
+    stage: 'Planning caption and image prompt.',
+  });
+
+  const post = await generateManualImagePost(config, group, group.jid, prompt);
+  let generatedImage: Awaited<ReturnType<typeof generateImage>> = null;
+
+  if (post.image?.prompt) {
+    updateManualActionJob(groupJid, jobId, {
+      status: 'running',
+      stage: 'Generating image with Gemini.',
+    });
+    generatedImage = await generateImage(config.global, post.image.prompt, {
+      latestUserText: prompt,
+      replyText: post.caption,
+      visualBrief: post.image.prompt,
+      reason: 'manual web image action',
+      literalness: post.image.literalness,
+      mood: post.image.mood,
+      style: post.image.style,
+      keySubjects: post.image.keySubjects,
+      mustAvoid: post.image.mustAvoid,
+      textInImage: post.image.textInImage,
+    });
+  }
+
+  updateManualActionJob(groupJid, jobId, {
+    status: 'running',
+    stage: 'Sending post to WhatsApp.',
+  });
+  if (generatedImage) {
+    await sendGroupImageMessage(group.jid, generatedImage.data, generatedImage.mimeType, post.caption);
+    finishManualActionJob(groupJid, jobId, 'succeeded', {
+      stage: 'Image post sent.',
+      result: 'Posted generated image and caption to the group.',
+    });
+    console.log(`[web-action] Sent manual image post to "${groupLabel}"`);
+  } else {
+    await sendGroupMessage(group.jid, post.caption);
+    finishManualActionJob(groupJid, jobId, 'succeeded', {
+      stage: 'Caption-only fallback sent.',
+      result: 'Posted the generated caption because no image was returned.',
+    });
+    console.log(`[web-action] Sent manual image fallback text post to "${groupLabel}"`);
+  }
+}
+
+async function runManualVideoAction(configHolder: ConfigHolder, groupJid: string, prompt: string, jobId: string): Promise<void> {
+  const group = findFreshGroup(configHolder, groupJid);
+  const config = configHolder.current;
+  const groupLabel = group.name ?? group.jid;
+  let generatedVideo: Awaited<ReturnType<typeof generateVideo>> = null;
+  console.log(`[web-action] Generating manual video post for "${groupLabel}" promptChars=${prompt.length}`);
+  updateManualActionJob(groupJid, jobId, {
+    status: 'running',
+    stage: 'Planning caption and video prompt.',
+  });
+
+  try {
+    const post = await generateManualVideoPost(config, group, group.jid, prompt);
+    if (!post.video?.prompt) {
+      updateManualActionJob(groupJid, jobId, {
+        status: 'running',
+        stage: 'Sending caption-only fallback to WhatsApp.',
+      });
+      await sendGroupMessage(group.jid, post.caption);
+      finishManualActionJob(groupJid, jobId, 'succeeded', {
+        stage: 'Caption-only fallback sent.',
+        result: 'Posted the generated caption because no video prompt was produced.',
+      });
+      console.log(`[web-action] Sent manual video fallback text post to "${groupLabel}" because no video prompt was produced`);
+      return;
+    }
+
+    updateManualActionJob(groupJid, jobId, {
+      status: 'running',
+      stage: 'Generating video with Veo.',
+    });
+    generatedVideo = await generateVideo(config.global, post.video.prompt, {
+      aspectRatio: post.video.aspectRatio,
+      durationSeconds: post.video.durationSeconds,
+      resolution: post.video.resolution,
+      personGeneration: post.video.personGeneration,
+    });
+
+    updateManualActionJob(groupJid, jobId, {
+      status: 'running',
+      stage: 'Sending video to WhatsApp.',
+    });
+    if (generatedVideo) {
+      await sendGroupVideoMessage(group.jid, generatedVideo.filePath, generatedVideo.mimeType, post.caption);
+      finishManualActionJob(groupJid, jobId, 'succeeded', {
+        stage: 'Video post sent.',
+        result: 'Posted generated video and caption to the group.',
+      });
+      console.log(`[web-action] Sent manual video post to "${groupLabel}"`);
+    } else {
+      await sendGroupMessage(group.jid, post.caption);
+      finishManualActionJob(groupJid, jobId, 'succeeded', {
+        stage: 'Caption-only fallback sent.',
+        result: 'Posted the generated caption because no video was returned.',
+      });
+      console.log(`[web-action] Sent manual video fallback text post to "${groupLabel}"`);
+    }
+  } finally {
+    await cleanupGeneratedVideo(generatedVideo);
+  }
+}
+
+function startBackgroundManualAction(
+  configHolder: ConfigHolder,
+  groupJid: string,
+  action: ManualGroupAction,
+  prompt: string,
+  jobId: string,
+): void {
+  void (async () => {
+    try {
+      if (action === 'generate-image') {
+        await runManualImageAction(configHolder, groupJid, prompt, jobId);
+      } else if (action === 'generate-video') {
+        await runManualVideoAction(configHolder, groupJid, prompt, jobId);
+      }
+    } catch (err) {
+      finishManualActionJob(groupJid, jobId, 'failed', {
+        stage: 'Manual post failed.',
+        error: describeError(err),
+      });
+      console.error(`[web-action] Failed ${action} for ${groupJid}:`, err);
+    }
+  })();
+}
+
 export function startWebServer(
   configHolder: ConfigHolder,
   configPath: string,
@@ -144,6 +410,7 @@ export function startWebServer(
         const chatMaxOutputTokens = parseInt(req.body.chatMaxOutputTokens, 10);
         if (!isNaN(chatMaxOutputTokens) && chatMaxOutputTokens > 0) raw.global.chatMaxOutputTokens = chatMaxOutputTokens;
         if (req.body.geminiImageModel) raw.global.geminiImageModel = req.body.geminiImageModel;
+        if (req.body.geminiVideoModel) raw.global.geminiVideoModel = req.body.geminiVideoModel;
       });
       res.send(renderSuccess('Global settings saved.', `/admin?token=${adminToken}`));
     } catch (err) {
@@ -158,7 +425,13 @@ export function startWebServer(
       return;
     }
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    res.send(renderAdminGroupEdit(configHolder.current, group, adminToken, baseUrl));
+    res.send(renderAdminGroupEdit(
+      configHolder.current,
+      group,
+      adminToken,
+      baseUrl,
+      getManualActionJobsForGroup(group.jid),
+    ));
   });
 
   app.post('/admin/group/:jid', requireAdmin, async (req: Request, res: Response) => {
@@ -201,6 +474,7 @@ export function startWebServer(
         if (!isNaN(rateLimitWindowSec) && rateLimitWindowSec > 0) group.chatbot.responseRateLimitWindowSec = rateLimitWindowSec;
         group.chatbot.responseRateLimitWarn = req.body.responseRateLimitWarn === '1';
         group.chatbot.enableImageGeneration = req.body.enableImageGeneration === '1';
+        group.chatbot.enableVideoGeneration = req.body.enableVideoGeneration === '1';
         group.chatbot.enableAutoImageReplies = req.body.enableAutoImageReplies === '1';
 
         // Events settings
@@ -238,6 +512,34 @@ export function startWebServer(
     }
   });
 
+  app.post('/admin/group/:jid/action', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const jid = req.params['jid'] as string;
+      const group = configHolder.current.groups.find((g) => g.jid === jid);
+      if (!group) {
+        res.status(404).send(renderError('Group not found.'));
+        return;
+      }
+
+      const action = parseManualGroupAction(req.body.action);
+      const backUrl = `/admin/group/${encodeURIComponent(group.jid)}?token=${adminToken}`;
+      if (action === 'send-message') {
+        const text = getRequiredText(req.body.text, 'Message text', MANUAL_ACTION_TEXT_MAX_CHARS);
+        const job = createManualActionJob(group.jid, action, text);
+        await runManualTextAction(configHolder, group.jid, text, job.id);
+        res.redirect(`${backUrl}&job=${encodeURIComponent(job.id)}`);
+        return;
+      }
+
+      const prompt = getRequiredText(req.body.prompt, 'Generation prompt', MANUAL_ACTION_PROMPT_MAX_CHARS);
+      const job = createManualActionJob(group.jid, action, prompt);
+      startBackgroundManualAction(configHolder, group.jid, action, prompt, job.id);
+      res.redirect(`${backUrl}&job=${encodeURIComponent(job.id)}`);
+    } catch (err) {
+      res.status(500).send(renderError(`Failed to run group action: ${err}`));
+    }
+  });
+
   // --- Per-Group Routes ---
 
   app.get('/group/:webToken', (req: Request, res: Response) => {
@@ -247,7 +549,12 @@ export function startWebServer(
       return;
     }
     const saved = req.query['saved'] === '1';
-    res.send(renderGroupEdit(configHolder.current, group, saved));
+    res.send(renderGroupEdit(
+      configHolder.current,
+      group,
+      saved,
+      getManualActionJobsForGroup(group.jid),
+    ));
   });
 
   app.post('/group/:webToken', async (req: Request, res: Response) => {
@@ -282,6 +589,7 @@ export function startWebServer(
         if (!isNaN(rateLimitWindowSec) && rateLimitWindowSec > 0) g.chatbot.responseRateLimitWindowSec = rateLimitWindowSec;
         g.chatbot.responseRateLimitWarn = req.body.responseRateLimitWarn === '1';
         g.chatbot.enableImageGeneration = req.body.enableImageGeneration === '1';
+        g.chatbot.enableVideoGeneration = req.body.enableVideoGeneration === '1';
         g.chatbot.enableAutoImageReplies = req.body.enableAutoImageReplies === '1';
         g.scheduledPosts = parseScheduledPosts(req.body.scheduledPostsJson, req.body);
       });
@@ -293,6 +601,34 @@ export function startWebServer(
       res.redirect(`/group/${token}?saved=1`);
     } catch (err) {
       res.status(500).send(renderError(`Failed to save: ${err}`));
+    }
+  });
+
+  app.post('/group/:webToken/action', async (req: Request, res: Response) => {
+    const webToken = req.params['webToken'];
+    const group = configHolder.current.groups.find((g) => g.webToken === webToken);
+    if (!group) {
+      res.status(404).send(renderError('Invalid group link.'));
+      return;
+    }
+
+    try {
+      const action = parseManualGroupAction(req.body.action);
+      const backUrl = `/group/${webToken}`;
+      if (action === 'send-message') {
+        const text = getRequiredText(req.body.text, 'Message text', MANUAL_ACTION_TEXT_MAX_CHARS);
+        const job = createManualActionJob(group.jid, action, text);
+        await runManualTextAction(configHolder, group.jid, text, job.id);
+        res.redirect(`${backUrl}?job=${encodeURIComponent(job.id)}`);
+        return;
+      }
+
+      const prompt = getRequiredText(req.body.prompt, 'Generation prompt', MANUAL_ACTION_PROMPT_MAX_CHARS);
+      const job = createManualActionJob(group.jid, action, prompt);
+      startBackgroundManualAction(configHolder, group.jid, action, prompt, job.id);
+      res.redirect(`${backUrl}?job=${encodeURIComponent(job.id)}`);
+    } catch (err) {
+      res.status(500).send(renderError(`Failed to run group action: ${err}`));
     }
   });
 

@@ -4,6 +4,7 @@
     "claudeMaxTokens": 1024,
     "chatMaxOutputTokens": 1024,
     "geminiImageModel": "gemini-3.1-flash-image-preview",
+    "geminiVideoModel": "veo-3.1-fast-generate-preview",
     "defaultChatModelId": "1a",
     "chatModels": [
       {
@@ -63,6 +64,7 @@
         "responseRateLimitWindowSec": 60,
         "responseRateLimitWarn": true,
         "enableImageGeneration": true,
+        "enableVideoGeneration": true,
         "enableAutoImageReplies": false
       },
       "scheduledPosts": [
@@ -93,6 +95,7 @@
         "responseRateLimitWindowSec": 90,
         "responseRateLimitWarn": true,
         "enableImageGeneration": true,
+        "enableVideoGeneration": true,
         "enableAutoImageReplies": false
       },
       "scheduledPosts": [
