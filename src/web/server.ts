@@ -667,6 +667,6 @@ export function startWebServer(
   });
 
   app.listen(port, () => {
-    console.log(`Web admin running at http://localhost:${port}/admin?token=${adminToken}`);
+    console.log(`Web admin running at http://localhost:${port}/admin?token=***`);
   });
 }
