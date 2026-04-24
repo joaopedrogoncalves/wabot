@@ -4,7 +4,7 @@
     "claudeMaxTokens": 1024,
     "chatMaxOutputTokens": 1024,
     "geminiImageModel": "gemini-3.1-flash-image-preview",
-    "geminiVideoModel": "veo-3.1-fast-generate-preview",
+    "geminiVideoModel": "veo-3.1-generate-preview",
     "defaultChatModelId": "1a",
     "chatModels": [
       {

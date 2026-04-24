@@ -225,7 +225,7 @@ export function loadAppConfig(): AppConfig {
     chatMaxOutputTokens: globalJson.chatMaxOutputTokens ?? globalJson.claudeMaxTokens ?? 1024,
     geminiApiKey: geminiApiKey || undefined,
     geminiImageModel: globalJson.geminiImageModel ?? 'gemini-3.1-flash-image-preview',
-    geminiVideoModel: globalJson.geminiVideoModel ?? 'veo-3.1-fast-generate-preview',
+    geminiVideoModel: globalJson.geminiVideoModel ?? 'veo-3.1-generate-preview',
     chatModels,
     defaultChatModelId: '',
   };

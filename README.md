@@ -86,7 +86,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
     "claudeMaxTokens": 1024,
     "chatMaxOutputTokens": 1024,
     "geminiImageModel": "gemini-3.1-flash-image-preview",
-    "geminiVideoModel": "veo-3.1-fast-generate-preview",
+    "geminiVideoModel": "veo-3.1-generate-preview",
     "defaultChatModelId": "1a",
     "chatModels": [
       {
@@ -185,7 +185,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
 | `claudeMaxTokens` | `1024` | Legacy Anthropic output cap used by existing Anthropic-only flows |
 | `chatMaxOutputTokens` | `1024` | Max output tokens for normal chatbot replies across all chat providers |
 | `geminiImageModel` | `gemini-3.1-flash-image-preview` | Gemini model used for image generation |
-| `geminiVideoModel` | `veo-3.1-fast-generate-preview` | Veo model used for explicit video requests |
+| `geminiVideoModel` | `veo-3.1-generate-preview` | Veo model used for explicit video requests. Use `veo-3.1-fast-generate-preview` if latency matters more than output quality. |
 | `defaultChatModelId` | first configured `chatModels` entry | Default group reply model id |
 | `chatModels` | built-in catalog | Global catalog of selectable chat reply models, including per-model capability flags such as web search and explicit thinking controls |
 

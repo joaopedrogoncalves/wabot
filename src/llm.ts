@@ -848,7 +848,7 @@ function parseVideoPlan(value: unknown): GeneratedVideoPlan | null {
 
   const durationSeconds = raw.durationSeconds === 4 || raw.durationSeconds === 6 || raw.durationSeconds === 8
     ? raw.durationSeconds
-    : 4;
+    : 8;
   const resolution = raw.resolution === '720p' || raw.resolution === '1080p' || raw.resolution === '4k'
     ? raw.resolution
     : '720p';
@@ -1129,12 +1129,14 @@ export async function generateVideoPromptForDirectRequest(
       'Write a single self-contained prompt suitable for Google Veo video generation.',
       'Keep the video prompt compact: ideally under 110 words.',
       'Include motion, action, camera movement, visual style, ambiance, and optional audio cues when useful.',
-      'Default to aspectRatio="9:16", durationSeconds=4, and resolution="720p".',
-      'Do not include personGeneration; this Veo endpoint rejects personGeneration parameters.',
+      'Default to aspectRatio="9:16", durationSeconds=8, and resolution="720p" for a more complete, cinematic clip.',
+      'Do not include personGeneration in the JSON; the request layer handles people-generation policy.',
       'Use 720p unless the user explicitly asks for higher resolution.',
-      'Use 4 seconds unless the user explicitly asks for a longer clip.',
+      'Use 8 seconds unless the user explicitly asks for a shorter clip.',
       'Prefer prompts in English unless the user explicitly asks for another language in the video.',
       'Avoid asking for readable text, captions, subtitles, signs, UI, or title cards unless explicitly requested.',
+      'When people are requested, describe generic adult performers or silhouettes unless the user provided a permitted reference image. Avoid exact likenesses of private people, celebrities, public figures, minors, or named real people.',
+      'For person-heavy scenes, emphasize expressive motion, wardrobe, lighting, choreography, camera movement, and atmosphere rather than facial identity.',
       'The bot reply itself must stay as plain text only, never markdown video syntax or video URLs.',
       'If the request is unsafe or you cannot infer a good video, return {"prompt":""}.',
     ].join('\n'),
@@ -1327,11 +1329,13 @@ export async function generateManualVideoPost(
       'The caption should read like a natural standalone group post from the bot, not an explanation of the prompt or admin request.',
       'The video prompt should be a self-contained brief for Google Veo video generation.',
       'Include motion, action, camera movement, visual style, ambiance, and optional audio cues when useful.',
-      'Default to aspectRatio="9:16", durationSeconds=4, and resolution="720p".',
-      'Do not include personGeneration; this Veo endpoint rejects personGeneration parameters.',
+      'Default to aspectRatio="9:16", durationSeconds=8, and resolution="720p" for a more complete, cinematic clip.',
+      'Do not include personGeneration in the JSON; the request layer handles people-generation policy.',
       'Use 720p unless the prompt explicitly asks for higher resolution.',
-      'Use 4 seconds unless the prompt explicitly asks for a longer clip.',
+      'Use 8 seconds unless the prompt explicitly asks for a shorter clip.',
       'Avoid readable text, captions, subtitles, signs, UI, or title cards unless explicitly requested.',
+      'When people are requested, describe generic adult performers or silhouettes unless the prompt includes a permitted reference image. Avoid exact likenesses of private people, celebrities, public figures, minors, or named real people.',
+      'For person-heavy scenes, emphasize expressive motion, wardrobe, lighting, choreography, camera movement, and atmosphere rather than facial identity.',
       'Do not add markdown video syntax, URLs, or explanatory notes.',
       'If no good video is appropriate, return an empty video prompt.',
     ],
