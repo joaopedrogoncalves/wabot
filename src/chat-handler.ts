@@ -631,7 +631,6 @@ async function sendGeneratedVideoReply(
       aspectRatio: videoPlan.aspectRatio,
       durationSeconds: videoPlan.durationSeconds,
       resolution: videoPlan.resolution,
-      personGeneration: videoPlan.personGeneration,
     });
     if (!generatedVideo) {
       throw new Error('Gemini returned no video.');

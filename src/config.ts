@@ -65,6 +65,7 @@ export interface EventsConfig {
   messageTemplate: string;
   cronSchedule: string;
   label?: string;
+  enableImageAnnouncements?: boolean;
 }
 
 export interface ChatbotGroupConfig {
@@ -260,6 +261,7 @@ export function loadAppConfig(): AppConfig {
           '🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!',
         cronSchedule: eventsRaw.cronSchedule ?? '0 8 * * *',
         label: eventsRaw.label ?? 'events',
+        enableImageAnnouncements: eventsRaw.enableImageAnnouncements ?? false,
       };
     }
 

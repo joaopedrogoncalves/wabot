@@ -54,8 +54,13 @@ function buildVideoParameters(options: GeminiVideoOptions): Record<string, unkno
     aspectRatio: options.aspectRatio ?? '9:16',
     durationSeconds,
     resolution,
-    personGeneration: options.personGeneration ?? 'allow_all',
   };
+
+  if (options.personGeneration) {
+    console.warn(
+      `[gemini-video] Ignoring personGeneration="${options.personGeneration}" because this Veo endpoint rejects personGeneration parameters.`,
+    );
+  }
 
   if ((resolution === '1080p' || resolution === '4k') && durationSeconds !== 8) {
     parameters.durationSeconds = 8;

@@ -46,7 +46,8 @@
         "sheetName": "Sheet1",
         "messageTemplate": "🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!",
         "cronSchedule": "0 8 * * *",
-        "label": "birthdays"
+        "label": "birthdays",
+        "enableImageAnnouncements": false
       },
       "chatbot": {
         "enabled": true,

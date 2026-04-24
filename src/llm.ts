@@ -38,7 +38,6 @@ export type GeneratedVideoPlan = {
   aspectRatio?: '16:9' | '9:16';
   durationSeconds?: 4 | 6 | 8;
   resolution?: '720p' | '1080p' | '4k';
-  personGeneration?: 'allow_all' | 'allow_adult' | 'dont_allow';
 };
 
 type JsonImageDecision = {
@@ -47,6 +46,11 @@ type JsonImageDecision = {
 };
 
 type JsonScheduledPost = {
+  caption?: string;
+  image?: GeneratedImagePlan;
+};
+
+type JsonEventAnnouncement = {
   caption?: string;
   image?: GeneratedImagePlan;
 };
@@ -851,16 +855,11 @@ function parseVideoPlan(value: unknown): GeneratedVideoPlan | null {
   const aspectRatio = raw.aspectRatio === '16:9' || raw.aspectRatio === '9:16'
     ? raw.aspectRatio
     : '9:16';
-  const personGeneration = raw.personGeneration === 'allow_all' || raw.personGeneration === 'allow_adult' || raw.personGeneration === 'dont_allow'
-    ? raw.personGeneration
-    : 'allow_all';
-
   return {
     prompt,
     aspectRatio,
     durationSeconds,
     resolution,
-    personGeneration,
   };
 }
 
@@ -1126,11 +1125,12 @@ export async function generateVideoPromptForDirectRequest(
     [
       'You are preparing a video-generation prompt for a companion video.',
       'The user directly asked for a video.',
-      'Return JSON only with the shape {"prompt":"...","aspectRatio":"9:16|16:9","durationSeconds":4|6|8,"resolution":"720p|1080p|4k","personGeneration":"allow_all|allow_adult|dont_allow"}',
+      'Return JSON only with the shape {"prompt":"...","aspectRatio":"9:16|16:9","durationSeconds":4|6|8,"resolution":"720p|1080p|4k"}',
       'Write a single self-contained prompt suitable for Google Veo video generation.',
       'Keep the video prompt compact: ideally under 110 words.',
       'Include motion, action, camera movement, visual style, ambiance, and optional audio cues when useful.',
-      'Default to aspectRatio="9:16", durationSeconds=4, resolution="720p", and personGeneration="allow_all".',
+      'Default to aspectRatio="9:16", durationSeconds=4, and resolution="720p".',
+      'Do not include personGeneration; this Veo endpoint rejects personGeneration parameters.',
       'Use 720p unless the user explicitly asks for higher resolution.',
       'Use 4 seconds unless the user explicitly asks for a longer clip.',
       'Prefer prompts in English unless the user explicitly asks for another language in the video.',
@@ -1322,12 +1322,13 @@ export async function generateManualVideoPost(
     groupJid,
     [
       'You are creating a manual WhatsApp group post with a generated video requested from the web interface.',
-      'Return JSON only with the shape {"caption":"...","video":{"prompt":"...","aspectRatio":"9:16|16:9","durationSeconds":4|6|8,"resolution":"720p|1080p|4k","personGeneration":"allow_all|allow_adult|dont_allow"}}',
+      'Return JSON only with the shape {"caption":"...","video":{"prompt":"...","aspectRatio":"9:16|16:9","durationSeconds":4|6|8,"resolution":"720p|1080p|4k"}}',
       'Use the group persona, style, and recent context where relevant.',
       'The caption should read like a natural standalone group post from the bot, not an explanation of the prompt or admin request.',
       'The video prompt should be a self-contained brief for Google Veo video generation.',
       'Include motion, action, camera movement, visual style, ambiance, and optional audio cues when useful.',
-      'Default to aspectRatio="9:16", durationSeconds=4, resolution="720p", and personGeneration="allow_all".',
+      'Default to aspectRatio="9:16", durationSeconds=4, and resolution="720p".',
+      'Do not include personGeneration; this Veo endpoint rejects personGeneration parameters.',
       'Use 720p unless the prompt explicitly asks for higher resolution.',
       'Use 4 seconds unless the prompt explicitly asks for a longer clip.',
       'Avoid readable text, captions, subtitles, signs, UI, or title cards unless explicitly requested.',
@@ -1451,6 +1452,75 @@ export async function generateScheduledImagePost(
   const image = parseImagePlan(parsed?.image, { literalness: 'vibe', textInImage: 'none' });
   if (!caption) {
     throw new Error(`Scheduled post generation returned invalid JSON or empty caption: ${responseText.slice(0, 400)}`);
+  }
+
+  return {
+    caption,
+    image,
+  };
+}
+
+export async function generateEventAnnouncementPost(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  eventName: string,
+  templateMessage: string,
+  eventsLabel: string,
+): Promise<{ caption: string; image: GeneratedImagePlan | null }> {
+  const anthropic = getClient(config.global.anthropicApiKey);
+  const systemPrompt = buildSystemPrompt(
+    groupConfig,
+    groupJid,
+    [
+      'You are generating a standalone scheduled event announcement for a WhatsApp group.',
+      'Return JSON only with the shape {"caption":"...","image":{"prompt":"...","mood":"...","style":"...","keySubjects":["..."],"mustAvoid":["..."],"textInImage":"none|minimal|allowed","literalness":"vibe|balanced|literal"}}',
+      'The caption should read like a natural group post, not a direct reply.',
+      'Write the caption fully in the bot persona and voice defined by the system prompt and group profile.',
+      'Use the provided template message as the announcement intent, but rewrite it only as much as needed to fit the configured persona.',
+      'Preserve the event name exactly in the caption.',
+      'Keep the caption concise enough for WhatsApp.',
+      'The image plan should be a self-contained visual brief for one fun companion image based primarily on the event name and the event type.',
+      'Do not make the image a text poster. Prefer a visual scene, character, mascot, object, or atmosphere that fits the event and persona.',
+      'Do not invent an identifiable likeness of a private person from just a name; if a person appears, make them generic or symbolic.',
+      'Default to literalness="vibe" unless the event name clearly describes a concrete visual subject.',
+      'Default to textInImage="none". Avoid readable text, signs, posters, headlines, newspaper layouts, captions, subtitles, chat bubbles, or UI.',
+      'Do not add markdown image syntax, URLs, or explanatory notes.',
+      'If no good image is appropriate, still provide a playful image prompt that matches the event name and caption.',
+    ],
+    { includeDynamicStyle: false },
+  );
+
+  const groupLabel = groupConfig.name ?? groupJid;
+  console.log(`[llm] Event announcement request for "${groupLabel}" / "${eventsLabel}" / "${eventName}"`);
+
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('Event announcement LLM request timed out after 2 minutes')), 120_000),
+  );
+  const response = await Promise.race([
+    anthropic.messages.create({
+      model: config.global.claudeModel,
+      max_tokens: Math.max(config.global.claudeMaxTokens, 1000),
+      system: systemPrompt,
+      messages: [{
+        role: 'user',
+        content: [
+          `Event label/type: ${eventsLabel}`,
+          `Event name: ${eventName}`,
+          `Configured template message:\n${templateMessage}`,
+          'Return the JSON now.',
+        ].join('\n\n'),
+      }],
+    } as any),
+    timeout,
+  ]);
+
+  const responseText = extractTextResponse(response).trim();
+  const parsed = parseJsonResponse<JsonEventAnnouncement>(responseText);
+  const caption = parsed?.caption?.trim() || '';
+  const image = parseImagePlan(parsed?.image, { literalness: 'vibe', textInImage: 'none' });
+  if (!caption) {
+    throw new Error(`Event announcement generation returned invalid JSON or empty caption: ${responseText.slice(0, 400)}`);
   }
 
   return {

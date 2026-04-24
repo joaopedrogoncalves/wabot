@@ -3,7 +3,7 @@ import { getAllowedChatModels, resolveGroupChatModel } from '../config.js';
 
 export type ManualActionJobView = {
   id: string;
-  action: 'send-message' | 'generate-image' | 'generate-video';
+  action: 'send-message' | 'generate-image' | 'generate-video' | 'send-next-event';
   status: 'queued' | 'running' | 'succeeded' | 'failed';
   stage: string;
   promptPreview: string;
@@ -267,6 +267,7 @@ function renderScheduledPostsEditor(group: GroupConfig, editorId: string): strin
 function getManualActionLabel(action: ManualActionJobView['action']): string {
   if (action === 'send-message') return 'Message';
   if (action === 'generate-image') return 'Image';
+  if (action === 'send-next-event') return 'Event';
   return 'Video';
 }
 
@@ -365,6 +366,7 @@ export function renderAdminDashboard(config: AppConfig, adminToken: string): str
   const rows = config.groups.map((g) => {
     const name = esc(g.name ?? g.jid);
     const hasEvents = g.events ? '<span class="badge badge-green">events</span>' : '';
+    const hasEventImages = g.events?.enableImageAnnouncements ? '<span class="badge badge-green">event images</span>' : '';
     const chatbotActive = g.chatbot && g.chatbot.enabled !== false;
     const hasChatbot = chatbotActive ? '<span class="badge badge-green">chatbot</span>' : '';
     const scheduledActive = (g.scheduledPosts?.some((job) => job.enabled !== false)) ?? false;
@@ -376,7 +378,7 @@ export function renderAdminDashboard(config: AppConfig, adminToken: string): str
       : '';
     return `<tr>
       <td>${name}<br><small style="color:#888">${esc(g.jid)}</small>${groupLink}</td>
-      <td>${hasEvents} ${hasChatbot} ${hasScheduled} ${noneLabel}</td>
+      <td>${hasEvents} ${hasEventImages} ${hasChatbot} ${hasScheduled} ${noneLabel}</td>
       <td><a href="/admin/group/${encodeURIComponent(g.jid)}?token=${esc(adminToken)}" class="btn btn-primary">Edit</a></td>
     </tr>`;
   }).join('\n');
@@ -468,6 +470,8 @@ export function renderAdminGroupEdit(
   const chatbot = group.chatbot;
   const events = group.events;
   const groupUrl = group.webToken ? `${baseUrl}/group/${group.webToken}` : '';
+  const sendNextEventFormId = `send-next-event-${group.jid.replace(/[^a-z0-9_-]/gi, '-')}`;
+  const sendNextEventAction = `/admin/group/${encodeURIComponent(group.jid)}/action?token=${esc(adminToken)}`;
 
   const body = `
     <h1>Edit: ${esc(group.name ?? group.jid)}</h1>
@@ -484,6 +488,9 @@ export function renderAdminGroupEdit(
     </div>` : ''}
 
     ${renderManualGroupActions(`/admin/group/${encodeURIComponent(group.jid)}/action?token=${adminToken}`, manualJobs)}
+    ${events ? `<form id="${esc(sendNextEventFormId)}" method="POST" action="${sendNextEventAction}" style="display:none">
+      <input type="hidden" name="action" value="send-next-event">
+    </form>` : ''}
 
     <div class="card">
       <h2>Chatbot Settings</h2>
@@ -565,6 +572,14 @@ export function renderAdminGroupEdit(
 
         <label>Cron Schedule</label>
         <input type="text" name="cronSchedule" value="${esc(events?.cronSchedule ?? '0 8 * * *')}">
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableEventImageAnnouncements" name="enableEventImageAnnouncements" value="1" ${events?.enableImageAnnouncements ? 'checked' : ''}>
+          <label for="enableEventImageAnnouncements">Send event announcements with generated images</label>
+        </div>
+
+        ${events ? `<button type="submit" form="${esc(sendNextEventFormId)}" class="btn btn-secondary">Send next event message now</button>
+        <p class="muted">Uses the next upcoming row in the sheet and respects the generated-image setting above after it has been saved.</p>` : '<p class="muted">Save events settings before sending a test event message.</p>'}
 
         <h2 style="margin-top:1.5rem">Scheduled Posts</h2>
         ${renderScheduledPostsEditor(group, 'admin-scheduled-posts')}

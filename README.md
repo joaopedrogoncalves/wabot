@@ -4,7 +4,7 @@ WABot is a WhatsApp group bot for persistent group automation. It combines sched
 
 Core features:
 
-1. **Events bot**: reads rows from a Google Sheet and sends scheduled messages to configured groups.
+1. **Events bot**: reads rows from a Google Sheet and sends scheduled messages to configured groups, optionally with persona-aware generated images.
 2. **LLM chatbot**: replies in configured groups through a per-group text model selector (Claude, Gemini, or Gemma), with optional web search, X/Twitter link enrichment, Gemini image generation, rate limiting, and a small web admin UI.
 3. **Scheduled autonomous posts**: runs cron-driven prompt jobs that look at recent chat context, optionally search the web, ingest the latest local news digest, and publish an image+caption post even without a trigger.
 4. **Passive group memory**: records messages and refreshes member summaries for all configured groups, even if chatbot replies are disabled there.
@@ -65,7 +65,7 @@ Configuration is split between environment variables (`.env`) for secrets and a 
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | For enabled chatbot groups | Anthropic API key used for text replies, media post planning, and profile summarization |
+| `ANTHROPIC_API_KEY` | For enabled chatbot groups and persona-planned cron media | Anthropic API key used for text replies, media post planning, event image announcement captions, and profile summarization |
 | `GEMINI_API_KEY` | No | Enables Gemini image generation and Veo video generation |
 | `TWITTER_BEARER_TOKEN` | No | X/Twitter API bearer token used to enrich `twitter.com` / `x.com` links with tweet text and metrics |
 | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | For groups with `events` | Google service account email |
@@ -127,7 +127,8 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
         "spreadsheetId": "1aBcDeFgHiJkLmNoPqRsTuVwXyZ",
         "sheetName": "Sheet1",
         "messageTemplate": "🎂 Happy Birthday, {name}! 🎉",
-        "cronSchedule": "0 8 * * *"
+        "cronSchedule": "0 8 * * *",
+        "enableImageAnnouncements": false
       },
       "chatbot": {
         "enabled": true,
@@ -201,6 +202,7 @@ The events bot reads rows from a Google Sheet and sends a message to the group w
 | `messageTemplate` | `🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!` | Message template — `{name}` is replaced with the person's name |
 | `cronSchedule` | `0 8 * * *` | Cron expression for when to check (default: daily at 8 AM) |
 | `label` | `events` | Label used in log messages |
+| `enableImageAnnouncements` | `false` | When enabled, event cron posts use the configured persona to draft a caption and include a Gemini-generated image based on the event name. If planning or image generation fails, the bot falls back to text. |
 
 #### Setting up the Google Sheet
 

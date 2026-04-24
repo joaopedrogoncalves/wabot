@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import type { ConfigHolder } from '../config.js';
 import type { GroupConfig } from '../config.js';
 import { updateConfigFile } from '../config.js';
-import { startEventCrons, startScheduledPostCrons } from '../cron.js';
+import { sendNextEventMessageNow, startEventCrons, startScheduledPostCrons } from '../cron.js';
 import { generateImage } from '../gemini.js';
 import { cleanupGeneratedVideo, generateVideo } from '../gemini-video.js';
 import { generateManualImagePost, generateManualVideoPost } from '../llm.js';
@@ -18,7 +18,7 @@ import {
   type ManualActionJobView,
 } from './templates.js';
 
-type ManualGroupAction = 'send-message' | 'generate-image' | 'generate-video';
+type ManualGroupAction = 'send-message' | 'generate-image' | 'generate-video' | 'send-next-event';
 type ManualActionJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 type ManualActionJob = ManualActionJobView & {
   groupJid: string;
@@ -121,7 +121,7 @@ function parseSelectedModelIds(rawValue: unknown): string[] {
 
 function parseManualGroupAction(rawValue: unknown): ManualGroupAction {
   const action = getTrimmedString(rawValue);
-  if (action === 'send-message' || action === 'generate-image' || action === 'generate-video') {
+  if (action === 'send-message' || action === 'generate-image' || action === 'generate-video' || action === 'send-next-event') {
     return action;
   }
   throw new Error('Invalid group action.');
@@ -158,7 +158,11 @@ function createManualActionJob(groupJid: string, action: ManualGroupAction, prom
     groupJid,
     action,
     status: 'queued',
-    stage: action === 'send-message' ? 'Waiting to send message.' : 'Waiting to start generation.',
+    stage: action === 'send-message'
+      ? 'Waiting to send message.'
+      : action === 'send-next-event'
+        ? 'Waiting to send next event message.'
+        : 'Waiting to start generation.',
     promptPreview: buildPromptPreview(prompt),
     createdAt: now,
     updatedAt: now,
@@ -225,6 +229,20 @@ async function runManualTextAction(configHolder: ConfigHolder, groupJid: string,
   finishManualActionJob(groupJid, jobId, 'succeeded', {
     stage: 'Message sent.',
     result: 'Posted exact message to the group.',
+  });
+}
+
+async function runManualNextEventAction(configHolder: ConfigHolder, groupJid: string, jobId: string): Promise<void> {
+  const group = findFreshGroup(configHolder, groupJid);
+  const config = configHolder.current;
+  updateManualActionJob(groupJid, jobId, {
+    status: 'running',
+    stage: 'Fetching the next configured event.',
+  });
+  const result = await sendNextEventMessageNow(config, group);
+  finishManualActionJob(groupJid, jobId, 'succeeded', {
+    stage: result.sentWithImage ? 'Next event image announcement sent.' : 'Next event message sent.',
+    result: `Posted ${result.name} (${result.date}) to the group${result.sentWithImage ? ' with a generated image' : ''}.`,
   });
 }
 
@@ -316,7 +334,6 @@ async function runManualVideoAction(configHolder: ConfigHolder, groupJid: string
       aspectRatio: post.video.aspectRatio,
       durationSeconds: post.video.durationSeconds,
       resolution: post.video.resolution,
-      personGeneration: post.video.personGeneration,
     });
 
     updateManualActionJob(groupJid, jobId, {
@@ -356,6 +373,8 @@ function startBackgroundManualAction(
         await runManualImageAction(configHolder, groupJid, prompt, jobId);
       } else if (action === 'generate-video') {
         await runManualVideoAction(configHolder, groupJid, prompt, jobId);
+      } else if (action === 'send-next-event') {
+        await runManualNextEventAction(configHolder, groupJid, jobId);
       }
     } catch (err) {
       finishManualActionJob(groupJid, jobId, 'failed', {
@@ -484,6 +503,7 @@ export function startWebServer(
           group.events.sheetName = req.body.sheetName || 'Sheet1';
           group.events.messageTemplate = req.body.messageTemplate || group.events.messageTemplate;
           group.events.cronSchedule = req.body.cronSchedule || group.events.cronSchedule || '0 8 * * *';
+          group.events.enableImageAnnouncements = req.body.enableEventImageAnnouncements === '1';
         } else {
           delete group.events;
         }
@@ -523,6 +543,13 @@ export function startWebServer(
 
       const action = parseManualGroupAction(req.body.action);
       const backUrl = `/admin/group/${encodeURIComponent(group.jid)}?token=${adminToken}`;
+      if (action === 'send-next-event') {
+        const job = createManualActionJob(group.jid, action, 'Send next event message now');
+        startBackgroundManualAction(configHolder, group.jid, action, '', job.id);
+        res.redirect(`${backUrl}&job=${encodeURIComponent(job.id)}`);
+        return;
+      }
+
       if (action === 'send-message') {
         const text = getRequiredText(req.body.text, 'Message text', MANUAL_ACTION_TEXT_MAX_CHARS);
         const job = createManualActionJob(group.jid, action, text);
@@ -615,6 +642,13 @@ export function startWebServer(
     try {
       const action = parseManualGroupAction(req.body.action);
       const backUrl = `/group/${webToken}`;
+      if (action === 'send-next-event') {
+        const job = createManualActionJob(group.jid, action, 'Send next event message now');
+        startBackgroundManualAction(configHolder, group.jid, action, '', job.id);
+        res.redirect(`${backUrl}?job=${encodeURIComponent(job.id)}`);
+        return;
+      }
+
       if (action === 'send-message') {
         const text = getRequiredText(req.body.text, 'Message text', MANUAL_ACTION_TEXT_MAX_CHARS);
         const job = createManualActionJob(group.jid, action, text);

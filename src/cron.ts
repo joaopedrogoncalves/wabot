@@ -2,11 +2,106 @@ import cron, { type ScheduledTask } from 'node-cron';
 import type { AppConfig, ConfigHolder, GroupConfig, ScheduledPostJobConfig } from './config.js';
 import { getHistorySince } from './chat-history.js';
 import { fetchEventRows } from './sheets.js';
-import { getTodaysEvents, formatEventMessage } from './events.js';
+import { getNextEvent, getTodaysEvents, formatEventMessage } from './events.js';
 import { sendGroupImageMessage, sendGroupMessage } from './whatsapp.js';
-import { generateScheduledImagePost } from './llm.js';
+import { generateEventAnnouncementPost, generateScheduledImagePost } from './llm.js';
 import { generateImage } from './gemini.js';
 import { loadLatestNewsDigest } from './news.js';
+
+async function sendEventAnnouncement(
+  config: AppConfig,
+  group: GroupConfig,
+  name: string,
+  templateMessage: string,
+  eventsLabel: string,
+): Promise<boolean> {
+  const groupLabel = group.name ?? group.jid;
+  let caption = templateMessage;
+  let imagePlan: Awaited<ReturnType<typeof generateEventAnnouncementPost>>['image'] = null;
+
+  if (config.global.anthropicApiKey) {
+    try {
+      const post = await generateEventAnnouncementPost(config, group, group.jid, name, templateMessage, eventsLabel);
+      caption = post.caption;
+      imagePlan = post.image;
+    } catch (err) {
+      console.error(`[events] Persona announcement generation failed for "${name}" in "${groupLabel}":`, err);
+    }
+  } else {
+    console.warn(`[events] ANTHROPIC_API_KEY is not set; using template caption for "${name}" in "${groupLabel}".`);
+  }
+
+  const fallbackPrompt = [
+    `A fun celebratory WhatsApp announcement image for ${eventsLabel}.`,
+    `Event name: ${name}.`,
+    'Make it playful, warm, expressive, and visually led.',
+    'Do not include readable text, signs, posters, captions, chat bubbles, or UI.',
+    'Do not depict an identifiable private person from only the name; use a symbolic or generic celebratory scene.',
+  ].join(' ');
+  const imagePrompt = imagePlan?.prompt || fallbackPrompt;
+  let generatedImage: Awaited<ReturnType<typeof generateImage>> = null;
+
+  try {
+    generatedImage = await generateImage(config.global, imagePrompt, {
+      latestUserText: `Scheduled ${eventsLabel} announcement for ${name}`,
+      replyText: caption,
+      visualBrief: imagePrompt,
+      reason: `event announcement "${eventsLabel}" for "${name}"`,
+      literalness: imagePlan?.literalness ?? 'vibe',
+      mood: imagePlan?.mood,
+      style: imagePlan?.style,
+      keySubjects: imagePlan?.keySubjects ?? [name, eventsLabel],
+      mustAvoid: imagePlan?.mustAvoid ?? ['readable text', 'identifiable private-person likeness'],
+      textInImage: imagePlan?.textInImage ?? 'none',
+    });
+  } catch (err) {
+    console.error(`[events] Gemini image generation failed for "${name}" in "${groupLabel}":`, err);
+  }
+
+  if (generatedImage) {
+    await sendGroupImageMessage(group.jid, generatedImage.data, generatedImage.mimeType, caption);
+    console.log(`[events] Sent image announcement for ${name} to "${groupLabel}"`);
+    return true;
+  } else {
+    await sendGroupMessage(group.jid, caption);
+    console.log(`[events] Sent caption-only announcement for ${name} to "${groupLabel}"`);
+    return false;
+  }
+}
+
+export async function sendNextEventMessageNow(
+  config: AppConfig,
+  group: GroupConfig,
+): Promise<{ name: string; date: string; sentWithImage: boolean }> {
+  const events = group.events;
+  if (!events) {
+    throw new Error(`Group "${group.name ?? group.jid}" does not have events configured.`);
+  }
+
+  const groupLabel = group.name ?? group.jid;
+  const eventsLabel = events.label ?? 'events';
+  console.log(`[events] Manual test requested for next ${eventsLabel} in "${groupLabel}"`);
+  const rows = await fetchEventRows(config.global, events);
+  const nextEvent = getNextEvent(rows);
+  if (!nextEvent) {
+    throw new Error(`No valid ${eventsLabel} rows found for "${groupLabel}".`);
+  }
+
+  const message = formatEventMessage(nextEvent.name, events.messageTemplate);
+  let sentWithImage = false;
+  if (events.enableImageAnnouncements) {
+    sentWithImage = await sendEventAnnouncement(config, group, nextEvent.name, message, eventsLabel);
+  } else {
+    await sendGroupMessage(group.jid, message);
+  }
+
+  console.log(`[events] Manual test sent ${eventsLabel} message for ${nextEvent.name} to "${groupLabel}"`);
+  return {
+    name: nextEvent.name,
+    date: nextEvent.date,
+    sentWithImage,
+  };
+}
 
 export async function checkEventsForGroup(config: AppConfig, group: GroupConfig): Promise<void> {
   const events = group.events;
@@ -30,7 +125,11 @@ export async function checkEventsForGroup(config: AppConfig, group: GroupConfig)
 
     for (const name of names) {
       const message = formatEventMessage(name, events.messageTemplate);
-      await sendGroupMessage(group.jid, message);
+      if (events.enableImageAnnouncements) {
+        await sendEventAnnouncement(config, group, name, message, eventsLabel);
+      } else {
+        await sendGroupMessage(group.jid, message);
+      }
       console.log(`Sent ${eventsLabel} message for ${name} to "${groupLabel}"`);
     }
   } catch (error) {
