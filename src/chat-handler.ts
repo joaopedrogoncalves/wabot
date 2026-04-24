@@ -37,6 +37,8 @@ const AUTO_IMAGE_COOLDOWN_MS = 60_000;
 const AUTO_IMAGE_BOT_REPLY_GAP = 2;
 const VIDEO_REACTION_ANIMATION_INTERVAL_MS = 2_000;
 const VIDEO_REACTION_ANIMATION_EMOJIS = ['🎬', '🎞️', '📽️', '⏳'];
+const IMAGE_REACTION_ANIMATION_INTERVAL_MS = 1_500;
+const IMAGE_REACTION_ANIMATION_EMOJIS = ['🎨', '🖌️', '🖼️', '✨'];
 
 function parseBotAliases(botName: string): string[] {
   const aliases = botName
@@ -314,6 +316,7 @@ function startReactionAnimation(
   key: WAMessageKey,
   emojis = VIDEO_REACTION_ANIMATION_EMOJIS,
   intervalMs = VIDEO_REACTION_ANIMATION_INTERVAL_MS,
+  label = 'generation',
 ): () => void {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -326,9 +329,9 @@ function startReactionAnimation(
 
     try {
       await sendReaction(remoteJid, key, emoji);
-      console.log(`[chat] Updated video generation reaction for ${remoteJid}: ${emoji}`);
+      console.log(`[chat] Updated ${label} reaction for ${remoteJid}: ${emoji}`);
     } catch (err) {
-      console.error(`Failed to update video generation reaction for ${remoteJid}:`, err);
+      console.error(`Failed to update ${label} reaction for ${remoteJid}:`, err);
     }
 
     if (!stopped) {
@@ -354,6 +357,15 @@ async function sendFinalVideoReaction(remoteJid: string, key: WAMessageKey, emoj
   setTimeout(() => {
     void sendReaction(remoteJid, key, emoji).catch((err) => {
       console.error(`Failed to reinforce final video reaction for ${remoteJid}:`, err);
+    });
+  }, 1_500);
+}
+
+async function sendFinalImageReaction(remoteJid: string, key: WAMessageKey, emoji: string): Promise<void> {
+  await sendReaction(remoteJid, key, emoji);
+  setTimeout(() => {
+    void sendReaction(remoteJid, key, emoji).catch((err) => {
+      console.error(`Failed to reinforce final image reaction for ${remoteJid}:`, err);
     });
   }, 1_500);
 }
@@ -532,24 +544,52 @@ async function sendGeneratedReply(
           console.log(`[chat] Gemini image plan for ${remoteJid}: ${JSON.stringify(imagePlanContext)}`);
         }
         const imageStartedAt = Date.now();
-        generatedImage = await generateImage(configHolder.current.global, imagePrompt, {
-          latestUserText,
-          replyText: responseText,
-          visualBrief: imagePrompt,
-          reason: imageReason ?? undefined,
-          ...imagePlanContext,
-        });
+        const stopImageReactionAnimation = reactionTargetKey
+          ? startReactionAnimation(
+              remoteJid,
+              reactionTargetKey,
+              IMAGE_REACTION_ANIMATION_EMOJIS,
+              IMAGE_REACTION_ANIMATION_INTERVAL_MS,
+              'image generation',
+            )
+          : () => {};
+        try {
+          generatedImage = await generateImage(configHolder.current.global, imagePrompt, {
+            latestUserText,
+            replyText: responseText,
+            visualBrief: imagePrompt,
+            reason: imageReason ?? undefined,
+            ...imagePlanContext,
+          });
+        } finally {
+          stopImageReactionAnimation();
+        }
         if (!generatedImage) {
           console.log(`[chat] Gemini returned no image for ${remoteJid}`);
+          if (explicitImageRequest && reactionTargetKey) {
+            await sendFinalImageReaction(remoteJid, reactionTargetKey, '❌').catch((reactionErr) => {
+              console.error(`Failed to send image failure reaction to ${remoteJid}:`, reactionErr);
+            });
+          }
         } else {
           console.log(
             `[chat] Gemini image ready for ${remoteJid} after ${Date.now() - imageStartedAt}ms ` +
             `mimeType=${generatedImage.mimeType}`,
           );
+          if (reactionTargetKey) {
+            await sendFinalImageReaction(remoteJid, reactionTargetKey, '🖼️').catch((reactionErr) => {
+              console.error(`Failed to send image success reaction to ${remoteJid}:`, reactionErr);
+            });
+          }
         }
       }
     } catch (err) {
       console.error('Failed to generate reply image:', err);
+      if (explicitImageRequest && reactionTargetKey) {
+        await sendFinalImageReaction(remoteJid, reactionTargetKey, '❌').catch((reactionErr) => {
+          console.error(`Failed to send image failure reaction to ${remoteJid}:`, reactionErr);
+        });
+      }
       if (explicitImageRequest) {
         responseText = sanitizeExplicitImageFallbackText(responseText);
       }

@@ -4,3 +4,4 @@ auth_info_baileys*/
 dist/
 groups.json
 group_profiles/
+logs/
