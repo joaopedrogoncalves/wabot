@@ -1,3 +1,5 @@
+import { appendFile, mkdir } from 'fs/promises';
+import { dirname, join } from 'path';
 import type { GlobalConfig } from './config.js';
 
 export type GeneratedImage = {
@@ -20,6 +22,7 @@ export type GeminiImageContext = {
 
 const GEMINI_IMAGE_TIMEOUT_MS = 180_000;
 const GEMINI_IMAGE_MAX_ATTEMPTS = 2;
+const GEMINI_IMAGE_LOG_PATH = process.env['WABOT_IMAGE_LOG_PATH'] ?? join(process.cwd(), 'logs', 'image-generation.jsonl');
 const GEMINI_LOGGABLE_RESPONSE_HEADERS = [
   'retry-after',
   'x-ratelimit-limit',
@@ -39,10 +42,13 @@ type GeminiPart = {
 
 type GeminiResponse = {
   candidates?: Array<{
+    finishReason?: string;
+    safetyRatings?: unknown;
     content?: {
       parts?: GeminiPart[];
     };
   }>;
+  promptFeedback?: unknown;
 };
 
 function isTimeoutError(err: unknown): boolean {
@@ -62,6 +68,38 @@ function describeResponseHeaders(response: Response): string {
     }
   }
   return parts.join(', ');
+}
+
+function responseHeadersObject(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  return headers;
+}
+
+function getErrorDetails(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+  }
+  return { message: String(err) };
+}
+
+async function appendImageLog(event: Record<string, unknown>): Promise<void> {
+  try {
+    await mkdir(dirname(GEMINI_IMAGE_LOG_PATH), { recursive: true });
+    await appendFile(
+      GEMINI_IMAGE_LOG_PATH,
+      `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`,
+      'utf8',
+    );
+  } catch (err) {
+    console.warn(`[gemini] Failed to write image log ${GEMINI_IMAGE_LOG_PATH}:`, err);
+  }
 }
 
 function buildGeminiPrompt(prompt: string, context?: GeminiImageContext): string {
@@ -160,6 +198,16 @@ export async function generateImage(
     );
     console.log(`[gemini] Final prompt for attempt ${attempt}/${GEMINI_IMAGE_MAX_ATTEMPTS}:\n${finalPrompt}`);
     try {
+      await appendImageLog({
+        event: 'request_started',
+        model,
+        attempt,
+        maxAttempts: GEMINI_IMAGE_MAX_ATTEMPTS,
+        prompt,
+        finalPrompt,
+        context,
+        promptChars: finalPrompt.length,
+      });
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -184,6 +232,16 @@ export async function generateImage(
 
       if (!response.ok) {
         const bodyText = await response.text();
+        await appendImageLog({
+          event: 'response_error',
+          model,
+          attempt,
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeadersObject(response),
+          elapsedMs: getElapsedMs(startedAt),
+          bodyText,
+        });
         throw new Error(`Gemini image request failed (${response.status}): ${bodyText.slice(0, 400)}`);
       }
 
@@ -197,6 +255,16 @@ export async function generateImage(
           `[gemini] No image part returned on attempt ${attempt}/${GEMINI_IMAGE_MAX_ATTEMPTS} ` +
           `after ${getElapsedMs(startedAt)}ms`,
         );
+        await appendImageLog({
+          event: 'response_no_image',
+          model,
+          attempt,
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeadersObject(response),
+          elapsedMs: getElapsedMs(startedAt),
+          payload,
+        });
         return null;
       }
 
@@ -212,6 +280,13 @@ export async function generateImage(
     } catch (err) {
       lastError = err;
       const elapsedMs = getElapsedMs(startedAt);
+      await appendImageLog({
+        event: 'request_exception',
+        model,
+        attempt,
+        elapsedMs,
+        error: getErrorDetails(err),
+      });
       console.warn(
         `[gemini] Image request failed on attempt ${attempt}/${GEMINI_IMAGE_MAX_ATTEMPTS} ` +
         `after ${elapsedMs}ms: ${err instanceof Error ? err.message : String(err)}`,
