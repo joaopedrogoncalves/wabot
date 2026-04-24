@@ -577,7 +577,7 @@ async function sendGeneratedReply(
             `mimeType=${generatedImage.mimeType}`,
           );
           if (reactionTargetKey) {
-            await sendFinalImageReaction(remoteJid, reactionTargetKey, '🖼️').catch((reactionErr) => {
+            await sendFinalImageReaction(remoteJid, reactionTargetKey, response.reactionEmoji ?? '🖼️').catch((reactionErr) => {
               console.error(`Failed to send image success reaction to ${remoteJid}:`, reactionErr);
             });
           }
@@ -689,7 +689,10 @@ async function sendGeneratedVideoReply(
       quoted ? { quoted } : undefined,
     );
     stopReactionAnimation();
-    await sendFinalVideoReaction(remoteJid, reactionTargetKey, '✅');
+    if (response.reactionEmoji) {
+      recordRecentReactionEmoji(remoteJid, response.reactionEmoji);
+    }
+    await sendFinalVideoReaction(remoteJid, reactionTargetKey, response.reactionEmoji ?? '✅');
     console.log(
       `[chat] Sent video reply to ${remoteJid} after ${Date.now() - videoStartedAt}ms ` +
       `messageId=${sent?.key?.id ?? 'unknown'}, caption="${responseText.slice(0, 160)}${responseText.length > 160 ? '...' : ''}"`,
