@@ -7,7 +7,7 @@ export type LatestNewsDigest = {
   content: string;
 };
 
-const DEFAULT_NEWS_DIR = '/mnt/multimedia/claw/news';
+const DEFAULT_NEWS_DIR = process.env['NEWS_DIGEST_DIR'] ?? '/mnt/multimedia/claw/news';
 const MAX_NEWS_CONTENT_CHARS = 16_000;
 
 export function loadLatestNewsDigest(newsDir = DEFAULT_NEWS_DIR): LatestNewsDigest | null {

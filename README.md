@@ -5,11 +5,13 @@ WABot is a WhatsApp group bot for persistent group automation. It combines sched
 Core features:
 
 1. **Events bot**: reads rows from a Google Sheet and sends scheduled messages to configured groups, optionally with persona-aware generated images.
-2. **LLM chatbot**: replies in configured groups through a per-group text model selector (Claude, Gemini, or Gemma), with optional web search, X/Twitter link enrichment, Gemini image generation, rate limiting, and a small web admin UI.
+2. **LLM chatbot**: replies in configured groups through a per-group text model selector (Claude or Gemini), with optional web search, X/Twitter link enrichment, Gemini image generation, rate limiting, and a small web admin UI.
 3. **Scheduled autonomous posts**: runs cron-driven prompt jobs that look at recent chat context, optionally search the web, ingest the latest local news digest, and publish an image+caption post even without a trigger.
 4. **Passive group memory**: records messages and refreshes member summaries for all configured groups, even if chatbot replies are disabled there.
 
 ## Setup
+
+Requires Node.js 20 or newer. The Baileys dependency enforces this during install, and newer transitive dependencies also declare Node 20+ engines.
 
 ```bash
 npm install
@@ -72,6 +74,9 @@ Configuration is split between environment variables (`.env`) for secrets and a 
 | `GOOGLE_PRIVATE_KEY` | For groups with `events` | Google service account private key |
 | `CONFIG_FILE` | No | Path to group config file (default: `./groups.json`) |
 | `CHAT_HISTORY_MAX` | No | Max in-memory messages kept per group for LLM context (default: `400`) |
+| `NEWS_DIGEST_DIR` | No | Directory scanned for the latest local news digest used by scheduled posts (default: `/mnt/multimedia/claw/news`) |
+| `WABOT_IMAGE_LOG_PATH` | No | JSONL path for Gemini image request logs (default: `./logs/image-generation.jsonl`) |
+| `WABOT_VIDEO_LOG_PATH` | No | JSONL path for Veo request logs (default: `./logs/video-generation.jsonl`) |
 | `ADMIN_TOKEN` | No | Enables the web admin panel at `http://host:WEB_PORT/admin?token=...` |
 | `WEB_PORT` | No | Web admin port (default: `3000`) |
 
@@ -85,7 +90,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
     "claudeModel": "claude-sonnet-4-6",
     "claudeMaxTokens": 1024,
     "chatMaxOutputTokens": 1024,
-    "geminiImageModel": "gemini-3.1-flash-image-preview",
+    "geminiImageModel": "gemini-3-pro-image-preview",
     "geminiVideoModel": "veo-3.1-generate-preview",
     "defaultChatModelId": "1a",
     "chatModels": [
@@ -100,21 +105,21 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
       },
       {
         "id": "1d",
-        "label": "Gemini 3.1 Pro",
+        "label": "Gemini 3 Pro Preview",
         "provider": "google",
-        "apiModel": "gemini-3.1-pro-preview",
+        "apiModel": "gemini-3-pro-preview",
         "supportsWebSearch": true,
         "supportsThinking": true,
         "supportsThinkingConfig": true
       },
       {
         "id": "1g",
-        "label": "Gemma 4 31B",
+        "label": "Gemini 3 Flash Preview",
         "provider": "google",
-        "apiModel": "gemma-4-31b-it",
-        "supportsWebSearch": false,
+        "apiModel": "gemini-3-flash-preview",
+        "supportsWebSearch": true,
         "supportsThinking": true,
-        "supportsThinkingConfig": false
+        "supportsThinkingConfig": true
       }
     ]
   },
@@ -184,7 +189,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
 | `claudeModel` | `claude-sonnet-4-6` | Anthropic model used by the background Anthropic-only flows such as scheduled-post drafting and profile summarization |
 | `claudeMaxTokens` | `1024` | Legacy Anthropic output cap used by existing Anthropic-only flows |
 | `chatMaxOutputTokens` | `1024` | Max output tokens for normal chatbot replies across all chat providers |
-| `geminiImageModel` | `gemini-3.1-flash-image-preview` | Gemini model used for image generation |
+| `geminiImageModel` | `gemini-3-pro-image-preview` | Gemini model used for image generation |
 | `geminiVideoModel` | `veo-3.1-generate-preview` | Veo model used for explicit video requests. Use `veo-3.1-fast-generate-preview` if latency matters more than output quality. |
 | `defaultChatModelId` | first configured `chatModels` entry | Default group reply model id |
 | `chatModels` | built-in catalog | Global catalog of selectable chat reply models, including per-model capability flags such as web search and explicit thinking controls |
@@ -288,7 +293,7 @@ Reaction emojis are also generated in the same reply call. The bot nudges models
 
 ### Scheduled posts
 
-Scheduled posts let a group publish an autonomous image+caption message without a trigger. Each job runs on its own cron schedule, looks at recent discussion, can optionally search the web, and also incorporates the latest digest file found under `/mnt/multimedia/claw/news/` when available before drafting a post and a companion image brief.
+Scheduled posts let a group publish an autonomous image+caption message without a trigger. Each job runs on its own cron schedule, looks at recent discussion, can optionally search the web, and also incorporates the latest digest file found under `NEWS_DIGEST_DIR` when available before drafting a post and a companion image brief.
 
 #### Scheduled post config fields
 
@@ -321,7 +326,7 @@ If `ADMIN_TOKEN` is set, the bot starts an Express server at `http://localhost:W
 - `/admin` shows all known groups and links to group editors
 - `/admin/global` edits `global` config fields stored in `groups.json`
 - `/admin/group/:jid` edits chatbot, per-group model allowlists/defaults, events, and scheduled-post settings for a group, can regenerate its `webToken`, and can send manual group posts
-- `/group/:webToken` is a shareable per-group page for that group's chatbot, event, scheduled-post, and manual posting controls
+- `/group/:webToken` is a shareable per-group page for that group's chatbot, scheduled-post, and manual posting controls
 
 The group pages include a "Post To Group" panel:
 
@@ -331,7 +336,7 @@ The group pages include a "Post To Group" panel:
 
 The same panel shows recent manual post status for the group, including active generation stages, sent confirmations, and failures. This status is kept in memory and resets when the bot restarts.
 
-Saving event or scheduled-post settings in the web UI immediately rebuilds the live cron schedule; a bot restart is not required for those edits to take effect.
+Saving event settings in the admin UI, or scheduled-post settings in either UI, immediately rebuilds the live cron schedule; a bot restart is not required for those edits to take effect.
 
 ## Project Structure
 
@@ -345,7 +350,7 @@ src/
   cron.ts           Scheduled event checks and autonomous post jobs
   chat-handler.ts   Passive message recorder plus chatbot trigger/reply logic
   chat-history.ts   In-memory group history used for prompts and recaps
-  llm.ts            Claude prompt building and reply generation
+  llm.ts            Anthropic/Gemini prompt building and reply generation
   gemini.ts         Gemini image generation
   news.ts           Latest local news digest loader for scheduled posts
   group-profiles.ts Member profile summarization

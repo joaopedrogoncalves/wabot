@@ -1,6 +1,7 @@
 import 'dotenv/config';
-import { readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { randomUUID } from 'crypto';
+import cron from 'node-cron';
 
 export type ChatModelProvider = 'anthropic' | 'google';
 
@@ -26,21 +27,21 @@ export const BUILTIN_CHAT_MODELS: ChatModelConfig[] = [
   },
   {
     id: '1d',
-    label: 'Gemini 3.1 Pro',
+    label: 'Gemini 3 Pro Preview',
     provider: 'google',
-    apiModel: 'gemini-3.1-pro-preview',
+    apiModel: 'gemini-3-pro-preview',
     supportsWebSearch: true,
     supportsThinking: true,
     supportsThinkingConfig: true,
   },
   {
     id: '1g',
-    label: 'Gemma 4 31B',
+    label: 'Gemini 3 Flash Preview',
     provider: 'google',
-    apiModel: 'gemma-4-31b-it',
-    supportsWebSearch: false,
+    apiModel: 'gemini-3-flash-preview',
+    supportsWebSearch: true,
     supportsThinking: true,
-    supportsThinkingConfig: false,
+    supportsThinkingConfig: true,
   },
 ];
 
@@ -121,6 +122,23 @@ function clampInteger(value: unknown, fallback: number, min: number, max?: numbe
   if (int < min) return fallback;
   if (max != null && int > max) return max;
   return int;
+}
+
+function atomicWriteJsonFileSync(filePath: string, value: unknown): void {
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + '\n', 'utf-8');
+  renameSync(tmpPath, filePath);
+}
+
+function validateCronSchedule(schedule: unknown, context: string): string {
+  if (typeof schedule !== 'string' || !schedule.trim()) {
+    throw new Error(`${context} is missing a cron schedule`);
+  }
+  const trimmed = schedule.trim();
+  if (!cron.validate(trimmed)) {
+    throw new Error(`${context} has invalid cron schedule "${trimmed}"`);
+  }
+  return trimmed;
 }
 
 function parseChatModels(rawValue: unknown): ChatModelConfig[] {
@@ -224,7 +242,7 @@ export function loadAppConfig(): AppConfig {
     claudeMaxTokens: globalJson.claudeMaxTokens ?? 1024,
     chatMaxOutputTokens: globalJson.chatMaxOutputTokens ?? globalJson.claudeMaxTokens ?? 1024,
     geminiApiKey: geminiApiKey || undefined,
-    geminiImageModel: globalJson.geminiImageModel ?? 'gemini-3.1-flash-image-preview',
+    geminiImageModel: globalJson.geminiImageModel ?? 'gemini-3-pro-image-preview',
     geminiVideoModel: globalJson.geminiVideoModel ?? 'veo-3.1-generate-preview',
     chatModels,
     defaultChatModelId: '',
@@ -259,7 +277,10 @@ export function loadAppConfig(): AppConfig {
         messageTemplate:
           eventsRaw.messageTemplate ??
           '🎂 Happy Birthday, {name}! 🎉 Wishing you an amazing day!',
-        cronSchedule: eventsRaw.cronSchedule ?? '0 8 * * *',
+        cronSchedule: validateCronSchedule(
+          eventsRaw.cronSchedule ?? '0 8 * * *',
+          `Group "${g.name ?? g.jid}" events config`,
+        ),
         label: eventsRaw.label ?? 'events',
         enableImageAnnouncements: eventsRaw.enableImageAnnouncements ?? false,
       };
@@ -351,7 +372,12 @@ export function loadAppConfig(): AppConfig {
         return {
           enabled: jobEnabled,
           label,
-          cronSchedule: job?.cronSchedule ?? '0 9 * * *',
+          cronSchedule: jobEnabled
+            ? validateCronSchedule(
+              job?.cronSchedule ?? '0 9 * * *',
+              `Group "${g.name ?? g.jid}" scheduled post "${label}"`,
+            )
+            : (typeof job?.cronSchedule === 'string' && job.cronSchedule.trim() ? job.cronSchedule.trim() : '0 9 * * *'),
           prompt: job?.prompt ?? '',
           lookbackHours: clampInteger(job?.lookbackHours, 24, 1, 168),
           enableWebSearch: job?.enableWebSearch ?? false,
@@ -374,7 +400,10 @@ export function syncGroups(
   try {
     const content = readFileSync(configPath, 'utf-8');
     rawJson = JSON.parse(content);
-  } catch {
+  } catch (err) {
+    if (existsSync(configPath)) {
+      throw new Error(`Failed to read config file "${configPath}" while syncing groups: ${err}`);
+    }
     rawJson = {};
   }
 
@@ -400,7 +429,7 @@ export function syncGroups(
   }
 
   rawJson.groups = groups;
-  writeFileSync(configPath, JSON.stringify(rawJson, null, 2) + '\n', 'utf-8');
+  atomicWriteJsonFileSync(configPath, rawJson);
   console.log('Synced group names from WhatsApp into config.');
 
   return loadAppConfig();
@@ -415,7 +444,7 @@ export function updateConfigFile(
   try {
     const rawJson = JSON.parse(backup);
     updater(rawJson);
-    writeFileSync(configPath, JSON.stringify(rawJson, null, 2) + '\n', 'utf-8');
+    atomicWriteJsonFileSync(configPath, rawJson);
     configHolder.current = loadAppConfig();
   } catch (err) {
     writeFileSync(configPath, backup, 'utf-8');

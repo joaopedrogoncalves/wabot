@@ -4,10 +4,24 @@
   "description": "WhatsApp group bot for scheduled events, Claude chat replies, Gemini images, passive group profiling, and autonomous cron posts",
   "type": "module",
   "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "start": "NODE_OPTIONS='--experimental-global-webcrypto' tsx src/index.ts",
-    "start:loop": "while true; do NODE_OPTIONS='--experimental-global-webcrypto' tsx src/index.ts; echo \"Process exited ($?), restarting in 5s...\"; sleep 5; done",
-    "dev": "NODE_OPTIONS='--experimental-global-webcrypto' tsx watch src/index.ts"
+    "start": "tsx src/index.ts",
+    "start:loop": "while true; do tsx src/index.ts; echo \"Process exited ($?), restarting in 5s...\"; sleep 5; done",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "audit": "npm audit --omit=dev"
+  },
+  "overrides": {
+    "brace-expansion": "2.1.0",
+    "file-type": "21.3.4",
+    "minimatch": "9.0.9",
+    "music-metadata": "11.12.3",
+    "path-to-regexp": "8.4.2",
+    "protobufjs": "7.5.5",
+    "qs": "6.15.1"
   },
   "keywords": [
     "whatsapp",

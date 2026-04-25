@@ -3,7 +3,7 @@
     "claudeModel": "claude-sonnet-4-6",
     "claudeMaxTokens": 1024,
     "chatMaxOutputTokens": 1024,
-    "geminiImageModel": "gemini-3.1-flash-image-preview",
+    "geminiImageModel": "gemini-3-pro-image-preview",
     "geminiVideoModel": "veo-3.1-generate-preview",
     "defaultChatModelId": "1a",
     "chatModels": [
@@ -18,21 +18,21 @@
       },
       {
         "id": "1d",
-        "label": "Gemini 3.1 Pro",
+        "label": "Gemini 3 Pro Preview",
         "provider": "google",
-        "apiModel": "gemini-3.1-pro-preview",
+        "apiModel": "gemini-3-pro-preview",
         "supportsWebSearch": true,
         "supportsThinking": true,
         "supportsThinkingConfig": true
       },
       {
         "id": "1g",
-        "label": "Gemma 4 31B",
+        "label": "Gemini 3 Flash Preview",
         "provider": "google",
-        "apiModel": "gemma-4-31b-it",
-        "supportsWebSearch": false,
+        "apiModel": "gemini-3-flash-preview",
+        "supportsWebSearch": true,
         "supportsThinking": true,
-        "supportsThinkingConfig": false
+        "supportsThinkingConfig": true
       }
     ]
   },

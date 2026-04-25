@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import Anthropic from '@anthropic-ai/sdk';
 import type { AppConfig } from './config.js';
 import { getHistory, getMessageCountSince } from './chat-history.js';
@@ -45,7 +45,10 @@ function loadProfiles(groupJid: string): GroupProfiles {
 
 function saveProfiles(groupJid: string, profiles: GroupProfiles): void {
   mkdirSync(PROFILES_DIR, { recursive: true });
-  writeFileSync(profilePath(groupJid), JSON.stringify(profiles, null, 2), 'utf-8');
+  const path = profilePath(groupJid);
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(profiles, null, 2), 'utf-8');
+  renameSync(tmpPath, path);
 }
 
 export function getProfilesPrompt(groupJid: string): string {
