@@ -100,6 +100,7 @@ export interface ChatbotGroupConfig {
   enableContextualTriggers?: boolean;
   contextualTriggerMaxPercent?: number;
   contextualTriggerWindowMessages?: number;
+  contextualTriggerCooldownMinutes?: number;
 }
 
 export interface ScheduledPostJobConfig {
@@ -413,6 +414,7 @@ export function loadAppConfig(): AppConfig {
         enableContextualTriggers: g.chatbot.enableContextualTriggers ?? true,
         contextualTriggerMaxPercent: clampInteger(g.chatbot.contextualTriggerMaxPercent, 12, 1, 100),
         contextualTriggerWindowMessages: clampInteger(g.chatbot.contextualTriggerWindowMessages, 100, 10, 1000),
+        contextualTriggerCooldownMinutes: clampInteger(g.chatbot.contextualTriggerCooldownMinutes, 120, 0, 10080),
       };
     }
 

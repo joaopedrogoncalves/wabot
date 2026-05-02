@@ -1,4 +1,6 @@
 import { areJidsSameUser, downloadMediaMessage, type WAMessageKey, type WASocket } from '@whiskeysockets/baileys';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
 import type { ConfigHolder, GroupConfig } from './config.js';
 import { getAllowedChatModels, isChatModelAvailable, resolveGroupChatModel, updateConfigFile } from './config.js';
 import { addMessage, findMessageById, getNameToJidMap, getRecentBotMessages, updateMessageText } from './chat-history.js';
@@ -40,6 +42,8 @@ const VIDEO_REACTION_ANIMATION_INTERVAL_MS = 2_000;
 const VIDEO_REACTION_ANIMATION_EMOJIS = ['🎬', '🎞️', '📽️', '⏳'];
 const IMAGE_REACTION_ANIMATION_INTERVAL_MS = 1_500;
 const IMAGE_REACTION_ANIMATION_EMOJIS = ['🎨', '🖌️', '🖼️', '✨'];
+const CONTEXTUAL_TRIGGER_STATE_PATH = process.env['WABOT_CONTEXT_TRIGGER_STATE_PATH']
+  ?? join(process.cwd(), 'logs', 'contextual-trigger-state.json');
 
 function parseBotAliases(botName: string): string[] {
   const aliases = botName
@@ -158,6 +162,74 @@ type TriggerRateSnapshot = {
 
 const triggerRateEventsByGroup = new Map<string, TriggerRateEvent[]>();
 const TRIGGER_RATE_MIN_SAMPLE = 20;
+
+type ContextualTriggerPersistentState = {
+  groups?: Record<string, { lastTriggeredAt?: number }>;
+};
+
+let contextualTriggerPersistentState: ContextualTriggerPersistentState | null = null;
+
+function loadContextualTriggerPersistentState(): ContextualTriggerPersistentState {
+  if (contextualTriggerPersistentState) return contextualTriggerPersistentState;
+  if (!existsSync(CONTEXTUAL_TRIGGER_STATE_PATH)) {
+    contextualTriggerPersistentState = { groups: {} };
+    return contextualTriggerPersistentState;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(CONTEXTUAL_TRIGGER_STATE_PATH, 'utf-8')) as ContextualTriggerPersistentState;
+    contextualTriggerPersistentState = parsed && typeof parsed === 'object' ? parsed : { groups: {} };
+  } catch (err) {
+    console.warn(`[chat] Failed to read contextual trigger state from ${CONTEXTUAL_TRIGGER_STATE_PATH}:`, err);
+    contextualTriggerPersistentState = { groups: {} };
+  }
+  if (!contextualTriggerPersistentState.groups) {
+    contextualTriggerPersistentState.groups = {};
+  }
+  return contextualTriggerPersistentState;
+}
+
+function saveContextualTriggerPersistentState(): void {
+  const state = loadContextualTriggerPersistentState();
+  try {
+    mkdirSync(dirname(CONTEXTUAL_TRIGGER_STATE_PATH), { recursive: true });
+    const tmpPath = `${CONTEXTUAL_TRIGGER_STATE_PATH}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(state, null, 2) + '\n', 'utf-8');
+    renameSync(tmpPath, CONTEXTUAL_TRIGGER_STATE_PATH);
+  } catch (err) {
+    console.error(`[chat] Failed to write contextual trigger state to ${CONTEXTUAL_TRIGGER_STATE_PATH}:`, err);
+  }
+}
+
+function getContextualTriggerCooldownMs(groupConfig: GroupConfig): number {
+  const minutes = groupConfig.chatbot?.contextualTriggerCooldownMinutes ?? 120;
+  return Math.max(0, minutes * 60_000);
+}
+
+function getContextualTriggerCooldownRemainingMs(groupJid: string, groupConfig: GroupConfig): number {
+  const cooldownMs = getContextualTriggerCooldownMs(groupConfig);
+  if (cooldownMs <= 0) return 0;
+  const state = loadContextualTriggerPersistentState();
+  const lastTriggeredAt = state.groups?.[groupJid]?.lastTriggeredAt;
+  if (!lastTriggeredAt || !Number.isFinite(lastTriggeredAt)) return 0;
+  return Math.max(0, cooldownMs - (Date.now() - lastTriggeredAt));
+}
+
+function recordContextualTriggerCooldown(groupJid: string): void {
+  const state = loadContextualTriggerPersistentState();
+  if (!state.groups) state.groups = {};
+  state.groups[groupJid] = { lastTriggeredAt: Date.now() };
+  saveContextualTriggerPersistentState();
+}
+
+function formatDuration(ms: number): string {
+  const totalMinutes = Math.max(1, Math.ceil(ms / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours <= 0) return `${minutes}m`;
+  if (minutes === 0) return `${hours}h`;
+  return `${hours}h ${minutes}m`;
+}
 
 function getTriggerRateSettings(groupConfig: GroupConfig): { maxPercent: number; windowMessages: number; minSample: number } {
   const chatbot = groupConfig.chatbot!;
@@ -393,6 +465,15 @@ async function evaluateContextualTrigger(
   sourceLabel = '',
 ): Promise<boolean> {
   if (groupConfig.chatbot?.enableContextualTriggers === false) {
+    return false;
+  }
+
+  const cooldownRemainingMs = getContextualTriggerCooldownRemainingMs(remoteJid, groupConfig);
+  if (cooldownRemainingMs > 0) {
+    console.log(
+      `[chat] Contextual trigger suppressed for ${remoteJid}${sourceLabel}: ` +
+      `cooldown active for ${formatDuration(cooldownRemainingMs)}`,
+    );
     return false;
   }
 
@@ -1040,6 +1121,9 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           msg.key.id ?? undefined,
           deterministicTriggered ? 'direct' : 'context',
         );
+        if (contextualTriggered) {
+          recordContextualTriggerCooldown(remoteJid);
+        }
         console.log(`Chat triggered by ${senderName} (${deterministicTriggered ? 'direct' : 'context'}): ${text}`);
         console.log(`[chat] Trigger share for ${remoteJid}: ${formatTriggerRate(triggerRate)}`);
         console.log(`[chat] Rate limit admitted for ${remoteJid}: ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
@@ -1170,6 +1254,9 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           messageId ?? undefined,
           deterministicTriggered ? 'direct' : 'context',
         );
+        if (contextualTriggered) {
+          recordContextualTriggerCooldown(remoteJid);
+        }
         console.log(`[chat] Edit triggered by ${senderJid} (${deterministicTriggered ? 'direct' : 'context'}): ${text}`);
         console.log(`[chat] Trigger share for ${remoteJid} (edit): ${formatTriggerRate(triggerRate)}`);
         console.log(`[chat] Rate limit admitted for ${remoteJid} (edit): ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);

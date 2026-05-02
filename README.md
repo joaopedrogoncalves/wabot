@@ -155,6 +155,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
         "enableContextualTriggers": true,
         "contextualTriggerMaxPercent": 12,
         "contextualTriggerWindowMessages": 100,
+        "contextualTriggerCooldownMinutes": 120,
         "enableThinking": true,
         "thinkingBudget": 2000,
         "enableWebSearch": true,
@@ -292,6 +293,7 @@ The allowlist and default are chosen by admins in config or the admin web UI. Th
 | `enableContextualTriggers` | `true` | Let the lightweight trigger model decide when normal conversation context should trigger the configured reply model |
 | `contextualTriggerMaxPercent` | `12` | Max rolling share of non-bot group messages that may trigger replies before context-based triggers are suppressed |
 | `contextualTriggerWindowMessages` | `100` | Rolling non-bot message window used to calculate trigger share |
+| `contextualTriggerCooldownMinutes` | `120` | Per-group cooldown after a context-based reply before another context-based reply is allowed; persisted under `logs/` so it survives restarts |
 | `enableThinking` | `false` | Enable provider thinking/reasoning when the selected model supports it |
 | `thinkingBudget` | `2000` | Thinking intensity hint used for provider-specific thinking controls |
 | `enableWebSearch` | `false` | Allow web search when the selected model supports it |

@@ -519,6 +519,9 @@ export function renderAdminGroupEdit(
         <label>Context Trigger Window (messages)</label>
         <input type="number" name="contextualTriggerWindowMessages" value="${chatbot?.contextualTriggerWindowMessages ?? 100}" min="10" max="1000">
 
+        <label>Context Trigger Cooldown (minutes)</label>
+        <input type="number" name="contextualTriggerCooldownMinutes" value="${chatbot?.contextualTriggerCooldownMinutes ?? 120}" min="0" max="10080">
+
         <label>System Prompt</label>
         <textarea name="systemPrompt">${esc(chatbot?.systemPrompt ?? '')}</textarea>
 
@@ -639,6 +642,9 @@ export function renderGroupEdit(
 
         <label>Context Trigger Window (messages)</label>
         <input type="number" name="contextualTriggerWindowMessages" value="${chatbot?.contextualTriggerWindowMessages ?? 100}" min="10" max="1000">
+
+        <label>Context Trigger Cooldown (minutes)</label>
+        <input type="number" name="contextualTriggerCooldownMinutes" value="${chatbot?.contextualTriggerCooldownMinutes ?? 120}" min="0" max="10080">
 
         <label>System Prompt</label>
         <textarea name="systemPrompt">${esc(chatbot?.systemPrompt ?? '')}</textarea>
