@@ -1,8 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { AppConfig, ChatModelConfig, GroupConfig, ScheduledPostJobConfig } from './config.js';
-import { resolveGroupChatModel } from './config.js';
+import { resolveGroupChatModel, resolveTriggerChatModel } from './config.js';
 import type { ChatMessage } from './chat-history.js';
-import { getRecentBotMessages, toAnthropicMessages, toGoogleContents } from './chat-history.js';
+import { getHistory, getRecentBotMessages, toAnthropicMessages, toGoogleContents } from './chat-history.js';
 import { getProfilesPrompt } from './group-profiles.js';
 import type { LatestNewsDigest } from './news.js';
 
@@ -18,6 +18,12 @@ type ResponseGenerationOptions = {
 export type GeneratedReply = {
   text: string;
   reactionEmoji?: string;
+};
+
+export type TriggerDecision = {
+  shouldRespond: boolean;
+  confidence?: number;
+  reason?: string;
 };
 
 export type ImageLiteralness = 'vibe' | 'balanced' | 'literal';
@@ -55,6 +61,12 @@ type JsonEventAnnouncement = {
   image?: GeneratedImagePlan;
 };
 
+type JsonTriggerDecision = {
+  shouldRespond?: boolean;
+  confidence?: number;
+  reason?: string;
+};
+
 type JsonManualVideoPost = {
   caption?: string;
   video?: GeneratedVideoPlan;
@@ -86,6 +98,9 @@ const GOOGLE_REASONING_LEAK_PATTERNS = [
 ];
 const MAX_RECENT_REACTION_EMOJIS = 8;
 const IMAGE_PLAN_MAX_TOKENS = 900;
+const TRIGGER_CONTEXT_MESSAGE_LIMIT = 18;
+const TRIGGER_CONTEXT_MESSAGE_MAX_CHARS = 420;
+const TRIGGER_MIN_CONFIDENCE = 0.72;
 const recentReactionEmojisByGroup = new Map<string, string[]>();
 const REACTION_EMOJI_MOOD_GUIDE = [
   'mocking laughter / absurdity: 😂 🤣 😹 😭',
@@ -282,6 +297,28 @@ function formatHistoryWindow(messages: readonly ChatMessage[]): string {
       parts.push('[no text]');
     }
     return `[${timestamp}] ${speaker}: ${parts.join(' ')}`;
+  }).join('\n');
+}
+
+function truncateForClassifier(text: string, maxChars = TRIGGER_CONTEXT_MESSAGE_MAX_CHARS): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+function formatTriggerHistoryWindow(groupJid: string): string {
+  const messages = getHistory(groupJid).slice(-TRIGGER_CONTEXT_MESSAGE_LIMIT);
+  if (messages.length === 0) {
+    return '[no recent discussion]';
+  }
+
+  return messages.map((msg) => {
+    const speaker = msg.fromBot ? `${msg.senderName || 'Bot'} (bot)` : msg.senderName;
+    const parts: string[] = [];
+    if (msg.imageData) parts.push('[image]');
+    if (msg.text?.trim()) parts.push(truncateForClassifier(msg.text));
+    if (parts.length === 0) parts.push('[no text]');
+    return `${speaker}: ${parts.join(' ')}`;
   }).join('\n');
 }
 
@@ -977,6 +1014,123 @@ async function generateShortPersonaLine(
   } as any);
 
   return extractTextResponse(response).trim();
+}
+
+function parseTriggerDecision(responseText: string): TriggerDecision {
+  const parsed = parseJsonResponse<JsonTriggerDecision>(responseText);
+  const looseShouldRespond = hasLooseBooleanField(responseText, 'shouldRespond', true);
+  const shouldRespond = parsed?.shouldRespond === true || looseShouldRespond;
+  const confidence = typeof parsed?.confidence === 'number'
+    ? clamp01(parsed.confidence)
+    : undefined;
+  const reason = typeof parsed?.reason === 'string'
+    ? parsed.reason.trim().slice(0, 240)
+    : undefined;
+
+  return {
+    shouldRespond: shouldRespond && confidence != null && confidence >= TRIGGER_MIN_CONFIDENCE,
+    ...(confidence != null ? { confidence } : {}),
+    ...(reason ? { reason } : {}),
+  };
+}
+
+function buildTriggerClassifierPrompt(groupConfig: GroupConfig, groupJid: string, triggerSenderName: string, latestUserText: string): string {
+  const chatbot = groupConfig.chatbot!;
+  const aliases = chatbot.botName
+    .split(',')
+    .map((alias) => alias.trim())
+    .filter(Boolean)
+    .join(', ') || chatbot.botName;
+
+  return [
+    'Decide whether the WhatsApp bot should proactively reply to the latest message based on the conversation context.',
+    '',
+    'Return JSON only with this exact shape: {"shouldRespond":true|false,"confidence":0.0-1.0,"reason":"short reason"}.',
+    '',
+    'Reply true only when there is strong evidence that the latest message is addressed to the bot, asks for bot/assistant help, asks the bot to judge/summarize/explain/fact-check/generate something, or continues a thread where the bot is clearly an active participant.',
+    'Reply true when the latest message names the bot, refers to "the bot"/"assistant"/"AI" in a way that calls for this bot to answer, or asks a question that no specific human participant is expected to answer and the persona is directly relevant.',
+    'Do not reply merely because the topic is interesting, funny, technical, or compatible with the persona.',
+    'Do not reply merely because the recent conversation mentioned bots, AI, models, coding, or the configured persona topic.',
+    'Reply false for ordinary human-to-human chatter, rhetorical comments, acknowledgements, reactions, private logistics, jokes among humans, or anything where a bot interjection would feel unsolicited.',
+    `Be strict: choose true only if confidence is at least ${TRIGGER_MIN_CONFIDENCE.toFixed(2)}. If intent is ambiguous, choose false.`,
+    'Do not require the bot name to be present. The bot name is only identity context, not the trigger rule.',
+    '',
+    `Bot aliases: ${aliases}`,
+    `Bot persona:\n${getGroupSystemPrompt(groupConfig)}`,
+    `Recent conversation:\n${formatTriggerHistoryWindow(groupJid)}`,
+    `Latest message to judge:\n[${triggerSenderName}]: ${latestUserText}`,
+    '',
+    'Return the JSON now.',
+  ].join('\n');
+}
+
+export async function decideContextualTrigger(
+  config: AppConfig,
+  groupConfig: GroupConfig,
+  groupJid: string,
+  latestUserText: string,
+  triggerSenderName: string,
+): Promise<TriggerDecision> {
+  const triggerModel = resolveTriggerChatModel(config.global);
+  const groupLabel = groupConfig.name ?? groupJid;
+  if (!triggerModel) {
+    console.warn(`[llm] No available trigger model for "${groupLabel}"; contextual trigger skipped.`);
+    return { shouldRespond: false, reason: 'no trigger model available' };
+  }
+
+  const prompt = buildTriggerClassifierPrompt(groupConfig, groupJid, triggerSenderName, latestUserText);
+  console.log(`[llm] Trigger classifier request for "${groupLabel}": provider=${triggerModel.provider} model=${triggerModel.apiModel}, modelId=${triggerModel.id}`);
+
+  if (triggerModel.provider === 'anthropic') {
+    const anthropic = getClient(config.global.anthropicApiKey);
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Trigger classifier timed out after 30 seconds')), 30_000),
+    );
+    const response = await Promise.race([
+      anthropic.messages.create({
+        model: triggerModel.apiModel,
+        max_tokens: 120,
+        system: 'You are a strict, low-latency routing classifier. Return only compact JSON.',
+        messages: [{ role: 'user', content: prompt }],
+      } as any),
+      timeout,
+    ]);
+    const decision = parseTriggerDecision(extractTextResponse(response));
+    console.log(`[llm] Trigger classifier decision for "${groupLabel}": ${decision.shouldRespond ? 'respond' : 'skip'}${decision.confidence != null ? ` confidence=${decision.confidence.toFixed(2)}` : ''}${decision.reason ? ` reason="${decision.reason}"` : ''}`);
+    return decision;
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(triggerModel.apiModel)}:generateContent`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-goog-api-key': config.global.geminiApiKey ?? '',
+    },
+    body: JSON.stringify({
+      system_instruction: {
+        parts: [{ text: 'You are a strict, low-latency routing classifier. Return only compact JSON.' }],
+      },
+      contents: [{
+        role: 'user',
+        parts: [{ text: prompt }],
+      }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        maxOutputTokens: 120,
+      },
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`Google trigger classifier request failed (${response.status}): ${bodyText.slice(0, 500)}`);
+  }
+
+  const json = await response.json() as GoogleGenerateContentResponse;
+  const decision = parseTriggerDecision(extractGoogleTextResponse(json));
+  console.log(`[llm] Trigger classifier decision for "${groupLabel}": ${decision.shouldRespond ? 'respond' : 'skip'}${decision.confidence != null ? ` confidence=${decision.confidence.toFixed(2)}` : ''}${decision.reason ? ` reason="${decision.reason}"` : ''}`);
+  return decision;
 }
 
 export async function generateResponse(

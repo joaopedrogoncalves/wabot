@@ -6,6 +6,7 @@
     "geminiImageModel": "gemini-3-pro-image-preview",
     "geminiVideoModel": "veo-3.1-generate-preview",
     "defaultChatModelId": "1a",
+    "triggerModelId": "trigger-lite",
     "chatModels": [
       {
         "id": "1a",
@@ -24,6 +25,15 @@
         "supportsWebSearch": true,
         "supportsThinking": true,
         "supportsThinkingConfig": true
+      },
+      {
+        "id": "trigger-lite",
+        "label": "Gemini 3.1 Flash Lite Preview",
+        "provider": "google",
+        "apiModel": "gemini-3.1-flash-lite-preview",
+        "supportsWebSearch": false,
+        "supportsThinking": false,
+        "supportsThinkingConfig": false
       },
       {
         "id": "1g",
@@ -56,6 +66,9 @@
         "allowedModelIds": ["1a", "1d", "1g"],
         "defaultModelId": "1a",
         "activeModelId": "1a",
+        "enableContextualTriggers": true,
+        "contextualTriggerMaxPercent": 12,
+        "contextualTriggerWindowMessages": 100,
         "enableThinking": true,
         "thinkingBudget": 2000,
         "enableWebSearch": true,
@@ -91,6 +104,9 @@
         "allowedModelIds": ["1a", "1d"],
         "defaultModelId": "1d",
         "activeModelId": "1d",
+        "enableContextualTriggers": true,
+        "contextualTriggerMaxPercent": 12,
+        "contextualTriggerWindowMessages": 100,
         "hotness": 55,
         "responseRateLimitCount": 8,
         "responseRateLimitWindowSec": 90,

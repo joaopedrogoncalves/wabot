@@ -35,6 +35,15 @@ export const BUILTIN_CHAT_MODELS: ChatModelConfig[] = [
     supportsThinkingConfig: true,
   },
   {
+    id: 'trigger-lite',
+    label: 'Gemini 3.1 Flash Lite Preview',
+    provider: 'google',
+    apiModel: 'gemini-3.1-flash-lite-preview',
+    supportsWebSearch: false,
+    supportsThinking: false,
+    supportsThinkingConfig: false,
+  },
+  {
     id: '1g',
     label: 'Gemini 3 Flash Preview',
     provider: 'google',
@@ -58,6 +67,7 @@ export interface GlobalConfig {
   geminiVideoModel: string;
   chatModels: ChatModelConfig[];
   defaultChatModelId: string;
+  triggerModelId: string;
 }
 
 export interface EventsConfig {
@@ -87,6 +97,9 @@ export interface ChatbotGroupConfig {
   enableImageGeneration?: boolean;
   enableVideoGeneration?: boolean;
   enableAutoImageReplies?: boolean;
+  enableContextualTriggers?: boolean;
+  contextualTriggerMaxPercent?: number;
+  contextualTriggerWindowMessages?: number;
 }
 
 export interface ScheduledPostJobConfig {
@@ -168,6 +181,15 @@ function parseChatModels(rawValue: unknown): ChatModelConfig[] {
     });
   }
 
+  if (parsed.length > 0) {
+    for (const builtin of BUILTIN_CHAT_MODELS) {
+      if (builtin.id === 'trigger-lite' && !seen.has(builtin.id.toLowerCase())) {
+        parsed.push({ ...builtin });
+        seen.add(builtin.id.toLowerCase());
+      }
+    }
+  }
+
   return parsed.length > 0 ? parsed : BUILTIN_CHAT_MODELS.map((model) => ({ ...model }));
 }
 
@@ -175,6 +197,14 @@ export function getChatModelById(globalConfig: GlobalConfig, modelId: string | u
   if (!modelId) return undefined;
   const normalized = modelId.trim().toLowerCase();
   return globalConfig.chatModels.find((model) => model.id.toLowerCase() === normalized);
+}
+
+function getChatModelByIdOrApiModel(globalConfig: GlobalConfig, modelIdOrApiModel: string | undefined): ChatModelConfig | undefined {
+  if (!modelIdOrApiModel) return undefined;
+  const normalized = modelIdOrApiModel.trim().toLowerCase();
+  return globalConfig.chatModels.find((model) =>
+    model.id.toLowerCase() === normalized || model.apiModel.toLowerCase() === normalized,
+  );
 }
 
 function hasProviderCredentials(globalConfig: GlobalConfig, provider: ChatModelProvider): boolean {
@@ -185,6 +215,14 @@ function hasProviderCredentials(globalConfig: GlobalConfig, provider: ChatModelP
 
 export function isChatModelAvailable(globalConfig: GlobalConfig, model: ChatModelConfig): boolean {
   return hasProviderCredentials(globalConfig, model.provider);
+}
+
+function getTriggerModelPriority(model: ChatModelConfig): number {
+  const text = `${model.id} ${model.label} ${model.apiModel}`;
+  if (/\b(?:flash[-\s]lite|lite)\b/iu.test(text)) return 1;
+  if (/\b(?:haiku|mini)\b/iu.test(text)) return 2;
+  if (/\bflash\b/iu.test(text)) return 3;
+  return 99;
 }
 
 export function getAllowedChatModels(globalConfig: GlobalConfig, groupConfig: GroupConfig): ChatModelConfig[] {
@@ -210,6 +248,28 @@ export function resolveGroupChatModel(globalConfig: GlobalConfig, groupConfig: G
   return activeCandidate && candidatePool.some((model) => model.id === activeCandidate.id)
     ? activeCandidate
     : defaultModel;
+}
+
+export function resolveTriggerChatModel(globalConfig: GlobalConfig): ChatModelConfig | null {
+  const configured = getChatModelByIdOrApiModel(globalConfig, globalConfig.triggerModelId);
+  if (configured && isChatModelAvailable(globalConfig, configured)) {
+    return configured;
+  }
+
+  const available = globalConfig.chatModels.filter((model) => isChatModelAvailable(globalConfig, model));
+  if (available.length === 0) return null;
+
+  const cheapCandidate = [...available]
+    .sort((a, b) => getTriggerModelPriority(a) - getTriggerModelPriority(b))
+    .find((model) => getTriggerModelPriority(model) < 99);
+  if (cheapCandidate) return cheapCandidate;
+
+  const defaultModel = getChatModelById(globalConfig, globalConfig.defaultChatModelId);
+  if (defaultModel && isChatModelAvailable(globalConfig, defaultModel)) {
+    return defaultModel;
+  }
+
+  return available[0] ?? null;
 }
 
 export function loadAppConfig(): AppConfig {
@@ -246,9 +306,16 @@ export function loadAppConfig(): AppConfig {
     geminiVideoModel: globalJson.geminiVideoModel ?? 'veo-3.1-generate-preview',
     chatModels,
     defaultChatModelId: '',
+    triggerModelId: '',
   };
   global.defaultChatModelId = getChatModelById(global, typeof globalJson.defaultChatModelId === 'string' ? globalJson.defaultChatModelId : '')
     ?.id ?? chatModels[0]?.id ?? BUILTIN_CHAT_MODELS[0].id;
+  global.triggerModelId = getChatModelByIdOrApiModel(global, typeof globalJson.triggerModelId === 'string' ? globalJson.triggerModelId : '')
+    ?.id
+    ?? [...chatModels]
+      .sort((a, b) => getTriggerModelPriority(a) - getTriggerModelPriority(b))
+      .find((model) => getTriggerModelPriority(model) < 99)?.id
+    ?? global.defaultChatModelId;
 
   const groups: GroupConfig[] = groupsJson.map((g: any, i: number) => {
     if (!g.jid) {
@@ -343,6 +410,9 @@ export function loadAppConfig(): AppConfig {
         enableImageGeneration: g.chatbot.enableImageGeneration ?? true,
         enableVideoGeneration: g.chatbot.enableVideoGeneration ?? true,
         enableAutoImageReplies: g.chatbot.enableAutoImageReplies ?? false,
+        enableContextualTriggers: g.chatbot.enableContextualTriggers ?? true,
+        contextualTriggerMaxPercent: clampInteger(g.chatbot.contextualTriggerMaxPercent, 12, 1, 100),
+        contextualTriggerWindowMessages: clampInteger(g.chatbot.contextualTriggerWindowMessages, 100, 10, 1000),
       };
     }
 

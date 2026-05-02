@@ -428,6 +428,8 @@ export function startWebServer(
         if (!isNaN(maxTokens) && maxTokens > 0) raw.global.claudeMaxTokens = maxTokens;
         const chatMaxOutputTokens = parseInt(req.body.chatMaxOutputTokens, 10);
         if (!isNaN(chatMaxOutputTokens) && chatMaxOutputTokens > 0) raw.global.chatMaxOutputTokens = chatMaxOutputTokens;
+        const triggerModelId = getTrimmedString(req.body.triggerModelId);
+        if (triggerModelId) raw.global.triggerModelId = triggerModelId;
         if (req.body.geminiImageModel) raw.global.geminiImageModel = req.body.geminiImageModel;
         if (req.body.geminiVideoModel) raw.global.geminiVideoModel = req.body.geminiVideoModel;
       });
@@ -465,6 +467,15 @@ export function startWebServer(
         if (!group.chatbot) group.chatbot = {};
         group.chatbot.enabled = !!req.body.chatbotEnabled;
         group.chatbot.botName = req.body.botName || group.chatbot.botName || 'bot';
+        group.chatbot.enableContextualTriggers = req.body.enableContextualTriggers === '1';
+        const contextualTriggerMaxPercent = parseInt(req.body.contextualTriggerMaxPercent, 10);
+        if (!isNaN(contextualTriggerMaxPercent)) {
+          group.chatbot.contextualTriggerMaxPercent = Math.max(1, Math.min(100, contextualTriggerMaxPercent));
+        }
+        const contextualTriggerWindowMessages = parseInt(req.body.contextualTriggerWindowMessages, 10);
+        if (!isNaN(contextualTriggerWindowMessages)) {
+          group.chatbot.contextualTriggerWindowMessages = Math.max(10, Math.min(1000, contextualTriggerWindowMessages));
+        }
         group.chatbot.systemPrompt = req.body.systemPrompt || group.chatbot.systemPrompt;
         const allowedModelIds = parseSelectedModelIds(req.body.allowedModelIds);
         const knownModelIds = new Set(configHolder.current.global.chatModels.map((model) => model.id.toLowerCase()));
@@ -601,6 +612,15 @@ export function startWebServer(
 
         if (!g.chatbot) g.chatbot = {};
         if (req.body.botName) g.chatbot.botName = req.body.botName;
+        g.chatbot.enableContextualTriggers = req.body.enableContextualTriggers === '1';
+        const contextualTriggerMaxPercent = parseInt(req.body.contextualTriggerMaxPercent, 10);
+        if (!isNaN(contextualTriggerMaxPercent)) {
+          g.chatbot.contextualTriggerMaxPercent = Math.max(1, Math.min(100, contextualTriggerMaxPercent));
+        }
+        const contextualTriggerWindowMessages = parseInt(req.body.contextualTriggerWindowMessages, 10);
+        if (!isNaN(contextualTriggerWindowMessages)) {
+          g.chatbot.contextualTriggerWindowMessages = Math.max(10, Math.min(1000, contextualTriggerWindowMessages));
+        }
         if (req.body.systemPrompt !== undefined) g.chatbot.systemPrompt = req.body.systemPrompt;
         g.chatbot.enableThinking = req.body.enableThinking === '1';
         const thinkingBudget = parseInt(req.body.thinkingBudget, 10);

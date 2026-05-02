@@ -433,6 +433,10 @@ export function renderAdminGlobalEdit(config: AppConfig, adminToken: string): st
         <label>Chat Max Output Tokens</label>
         <input type="number" name="chatMaxOutputTokens" value="${g.chatMaxOutputTokens}" min="1">
 
+        <label>Context Trigger Model ID or API Model</label>
+        <input type="text" name="triggerModelId" value="${esc(g.triggerModelId)}">
+        <p class="muted">Used only for the lightweight decision about whether normal group chatter should trigger a reply.</p>
+
         <h2 style="margin-top:1.5rem">Chat Model Catalog</h2>
         <p class="muted">The catalog is config-defined. These are the currently loaded model ids available to group admins.</p>
         <table>
@@ -503,6 +507,17 @@ export function renderAdminGroupEdit(
 
         <label>Bot Name</label>
         <input type="text" name="botName" value="${esc(chatbot?.botName ?? '')}">
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableContextualTriggers" name="enableContextualTriggers" value="1" ${chatbot?.enableContextualTriggers !== false ? 'checked' : ''}>
+          <label for="enableContextualTriggers">Allow context-based triggers</label>
+        </div>
+
+        <label>Context Trigger Cap (%)</label>
+        <input type="number" name="contextualTriggerMaxPercent" value="${chatbot?.contextualTriggerMaxPercent ?? 12}" min="1" max="100">
+
+        <label>Context Trigger Window (messages)</label>
+        <input type="number" name="contextualTriggerWindowMessages" value="${chatbot?.contextualTriggerWindowMessages ?? 100}" min="10" max="1000">
 
         <label>System Prompt</label>
         <textarea name="systemPrompt">${esc(chatbot?.systemPrompt ?? '')}</textarea>
@@ -613,6 +628,17 @@ export function renderGroupEdit(
       <form method="POST">
         <label>Bot Name</label>
         <input type="text" name="botName" value="${esc(chatbot?.botName ?? '')}">
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="enableContextualTriggers" name="enableContextualTriggers" value="1" ${chatbot?.enableContextualTriggers !== false ? 'checked' : ''}>
+          <label for="enableContextualTriggers">Allow context-based triggers</label>
+        </div>
+
+        <label>Context Trigger Cap (%)</label>
+        <input type="number" name="contextualTriggerMaxPercent" value="${chatbot?.contextualTriggerMaxPercent ?? 12}" min="1" max="100">
+
+        <label>Context Trigger Window (messages)</label>
+        <input type="number" name="contextualTriggerWindowMessages" value="${chatbot?.contextualTriggerWindowMessages ?? 100}" min="10" max="1000">
 
         <label>System Prompt</label>
         <textarea name="systemPrompt">${esc(chatbot?.systemPrompt ?? '')}</textarea>

@@ -93,6 +93,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
     "geminiImageModel": "gemini-3-pro-image-preview",
     "geminiVideoModel": "veo-3.1-generate-preview",
     "defaultChatModelId": "1a",
+    "triggerModelId": "trigger-lite",
     "chatModels": [
       {
         "id": "1a",
@@ -111,6 +112,15 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
         "supportsWebSearch": true,
         "supportsThinking": true,
         "supportsThinkingConfig": true
+      },
+      {
+        "id": "trigger-lite",
+        "label": "Gemini 3.1 Flash Lite Preview",
+        "provider": "google",
+        "apiModel": "gemini-3.1-flash-lite-preview",
+        "supportsWebSearch": false,
+        "supportsThinking": false,
+        "supportsThinkingConfig": false
       },
       {
         "id": "1g",
@@ -142,6 +152,9 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
         "allowedModelIds": ["1a", "1d", "1g"],
         "defaultModelId": "1a",
         "activeModelId": "1a",
+        "enableContextualTriggers": true,
+        "contextualTriggerMaxPercent": 12,
+        "contextualTriggerWindowMessages": 100,
         "enableThinking": true,
         "thinkingBudget": 2000,
         "enableWebSearch": true,
@@ -192,6 +205,7 @@ Each group can have an `events` config, a `chatbot` config, or both. See `groups
 | `geminiImageModel` | `gemini-3-pro-image-preview` | Gemini model used for image generation |
 | `geminiVideoModel` | `veo-3.1-generate-preview` | Veo model used for explicit video requests. Use `veo-3.1-fast-generate-preview` if latency matters more than output quality. |
 | `defaultChatModelId` | first configured `chatModels` entry | Default group reply model id |
+| `triggerModelId` | `trigger-lite` when available, then first cheap-looking configured model, then `defaultChatModelId` | Lightweight model id used only to decide whether normal conversation context should trigger a reply |
 | `chatModels` | built-in catalog | Global catalog of selectable chat reply models, including per-model capability flags such as web search and explicit thinking controls |
 
 ### Events Bot
@@ -249,7 +263,7 @@ Only the day and month are used for matching; the year is ignored. The bot fetch
 
 ### LLM Chatbot
 
-The chatbot triggers when a user:
+The chatbot uses a lightweight trigger model to decide whether ordinary group conversation context calls for a reply. Direct triggers still bypass that classifier when a user:
 
 1. @mentions the bot
 2. starts a message with the configured `botName`
@@ -270,11 +284,14 @@ The allowlist and default are chosen by admins in config or the admin web UI. Th
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Set to `false` to disable without removing the config |
-| `botName` | — | **Required.** Keyword prefix that triggers the bot. Multiple aliases can be provided as a comma-separated string |
+| `botName` | — | **Required.** Bot identity aliases used for direct prefix triggers and commands. Multiple aliases can be provided as a comma-separated string |
 | `systemPrompt` | `You are a helpful assistant in a WhatsApp group chat. Be concise and friendly.` | Bot persona / system prompt |
 | `allowedModelIds` | `[global.defaultChatModelId]` | Model ids that this group is allowed to switch between |
 | `defaultModelId` | first allowed model | Group default reply model |
 | `activeModelId` | `defaultModelId` | Currently selected reply model for the group |
+| `enableContextualTriggers` | `true` | Let the lightweight trigger model decide when normal conversation context should trigger the configured reply model |
+| `contextualTriggerMaxPercent` | `12` | Max rolling share of non-bot group messages that may trigger replies before context-based triggers are suppressed |
+| `contextualTriggerWindowMessages` | `100` | Rolling non-bot message window used to calculate trigger share |
 | `enableThinking` | `false` | Enable provider thinking/reasoning when the selected model supports it |
 | `thinkingBudget` | `2000` | Thinking intensity hint used for provider-specific thinking controls |
 | `enableWebSearch` | `false` | Allow web search when the selected model supports it |

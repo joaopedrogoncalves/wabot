@@ -6,6 +6,7 @@ import { generateImage } from './gemini.js';
 import { cleanupGeneratedVideo, generateVideo } from './gemini-video.js';
 import {
   decideImageForReply,
+  decideContextualTrigger,
   generateImagePromptForDirectRequest,
   generateImagePromptForReply,
   generateRateLimitWarning,
@@ -138,6 +139,95 @@ type GroupRateLimitState = {
 };
 
 const groupRateLimits = new Map<string, GroupRateLimitState>();
+
+type TriggerRateEvent = {
+  messageId?: string;
+  timestamp: number;
+  triggered: boolean;
+  kind?: 'direct' | 'context';
+};
+
+type TriggerRateSnapshot = {
+  total: number;
+  triggered: number;
+  percent: number;
+  maxPercent: number;
+  windowMessages: number;
+  minSample: number;
+};
+
+const triggerRateEventsByGroup = new Map<string, TriggerRateEvent[]>();
+const TRIGGER_RATE_MIN_SAMPLE = 20;
+
+function getTriggerRateSettings(groupConfig: GroupConfig): { maxPercent: number; windowMessages: number; minSample: number } {
+  const chatbot = groupConfig.chatbot!;
+  const windowMessages = Math.max(10, chatbot.contextualTriggerWindowMessages ?? 100);
+  return {
+    maxPercent: Math.max(1, Math.min(100, chatbot.contextualTriggerMaxPercent ?? 12)),
+    windowMessages,
+    minSample: Math.min(TRIGGER_RATE_MIN_SAMPLE, windowMessages),
+  };
+}
+
+function getGroupTriggerRateEvents(groupJid: string): TriggerRateEvent[] {
+  let events = triggerRateEventsByGroup.get(groupJid);
+  if (!events) {
+    events = [];
+    triggerRateEventsByGroup.set(groupJid, events);
+  }
+  return events;
+}
+
+function recordInboundTriggerRateMessage(groupJid: string, groupConfig: GroupConfig, messageId?: string): void {
+  const events = getGroupTriggerRateEvents(groupJid);
+  if (messageId && events.some((event) => event.messageId === messageId)) {
+    return;
+  }
+  events.push({ messageId, timestamp: Date.now(), triggered: false });
+  const { windowMessages } = getTriggerRateSettings(groupConfig);
+  const maxStored = Math.max(windowMessages, 1000);
+  if (events.length > maxStored) {
+    events.splice(0, events.length - maxStored);
+  }
+}
+
+function markTriggerRateMessage(groupJid: string, groupConfig: GroupConfig, messageId: string | undefined, kind: 'direct' | 'context'): TriggerRateSnapshot {
+  const events = getGroupTriggerRateEvents(groupJid);
+  const target = messageId
+    ? [...events].reverse().find((event) => event.messageId === messageId)
+    : [...events].reverse().find((event) => !event.triggered);
+  if (target) {
+    target.triggered = true;
+    target.kind = kind;
+  }
+  return getTriggerRateSnapshot(groupJid, groupConfig);
+}
+
+function getTriggerRateSnapshot(groupJid: string, groupConfig: GroupConfig): TriggerRateSnapshot {
+  const { maxPercent, windowMessages, minSample } = getTriggerRateSettings(groupConfig);
+  const recent = getGroupTriggerRateEvents(groupJid).slice(-windowMessages);
+  const total = recent.length;
+  const triggered = recent.filter((event) => event.triggered).length;
+  const percent = total > 0 ? (triggered / total) * 100 : 0;
+  return { total, triggered, percent, maxPercent, windowMessages, minSample };
+}
+
+function shouldAdmitContextualTriggerByRate(groupJid: string, groupConfig: GroupConfig): { allowed: boolean; snapshot: TriggerRateSnapshot; projectedPercent: number } {
+  const snapshot = getTriggerRateSnapshot(groupJid, groupConfig);
+  const projectedPercent = snapshot.total > 0
+    ? ((snapshot.triggered + 1) / snapshot.total) * 100
+    : 100;
+  return {
+    allowed: snapshot.total < snapshot.minSample || projectedPercent <= snapshot.maxPercent,
+    snapshot,
+    projectedPercent,
+  };
+}
+
+function formatTriggerRate(snapshot: TriggerRateSnapshot, projectedPercent?: number): string {
+  const projected = projectedPercent == null ? '' : `, projected ${projectedPercent.toFixed(1)}%`;
+  return `${snapshot.triggered}/${snapshot.total} messages (${snapshot.percent.toFixed(1)}%${projected}, cap ${snapshot.maxPercent}% over last ${snapshot.windowMessages})`;
+}
 
 function getGroupRateLimitState(groupJid: string): GroupRateLimitState {
   let state = groupRateLimits.get(groupJid);
@@ -292,6 +382,54 @@ function formatModelList(groupConfig: GroupConfig, configHolder: ConfigHolder): 
   }
   lines.push('Usa `/model <id>` para mudar.');
   return lines.join('\n');
+}
+
+async function evaluateContextualTrigger(
+  configHolder: ConfigHolder,
+  groupConfig: GroupConfig,
+  remoteJid: string,
+  text: string,
+  senderName: string,
+  sourceLabel = '',
+): Promise<boolean> {
+  if (groupConfig.chatbot?.enableContextualTriggers === false) {
+    return false;
+  }
+
+  const rateDecision = shouldAdmitContextualTriggerByRate(remoteJid, groupConfig);
+  if (!rateDecision.allowed) {
+    console.log(
+      `[chat] Contextual trigger suppressed for ${remoteJid}${sourceLabel}: ` +
+      `trigger share too high (${formatTriggerRate(rateDecision.snapshot, rateDecision.projectedPercent)})`,
+    );
+    return false;
+  }
+
+  try {
+    const decision = await decideContextualTrigger(
+      configHolder.current,
+      groupConfig,
+      remoteJid,
+      text,
+      senderName,
+    );
+    if (decision.shouldRespond) {
+      console.log(
+        `[chat] Contextual trigger admitted for ${remoteJid}${sourceLabel}: ` +
+        `${decision.reason ?? 'classifier chose to respond'} ` +
+        `(${formatTriggerRate(rateDecision.snapshot, rateDecision.projectedPercent)})`,
+      );
+      return true;
+    }
+    console.log(
+      `[chat] Contextual trigger skipped for ${remoteJid}${sourceLabel}` +
+      `${decision.reason ? `: ${decision.reason}` : ''}`,
+    );
+  } catch (err) {
+    console.error(`Failed to classify contextual trigger for ${remoteJid}${sourceLabel}:`, err);
+  }
+
+  return false;
 }
 
 async function sendPlainReply(remoteJid: string, text: string, quoted?: any): Promise<void> {
@@ -836,6 +974,7 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         // Skip trigger check for bot's own messages
         if (fromBot) continue;
         if (!groupConfig) continue;
+        recordInboundTriggerRateMessage(remoteJid, groupConfig, msg.key.id ?? undefined);
 
         // Image-only messages (no text) are recorded but don't trigger a response
         if (!text) continue;
@@ -857,13 +996,19 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
           (!!botLid && areJidsSameUser(quotedParticipant, botLid))
         );
 
-        if (!mentionTriggered && !prefixTriggered && !replyTriggered) continue;
+        const deterministicTriggered = mentionTriggered || prefixTriggered || replyTriggered;
+        const contextualTriggered = deterministicTriggered
+          ? false
+          : await evaluateContextualTrigger(configHolder, groupConfig, remoteJid, text, senderName);
+        if (!deterministicTriggered && !contextualTriggered) continue;
         const explicitImageRequest = isExplicitImageRequest(text);
         const explicitVideoRequest = isExplicitVideoRequest(text);
         const modelCommand = parseModelCommand(text);
 
         if (modelCommand) {
           console.log(`[chat] Model command triggered for ${remoteJid}: ${text}`);
+          const triggerRate = markTriggerRateMessage(remoteJid, groupConfig, msg.key.id ?? undefined, 'direct');
+          console.log(`[chat] Trigger share for ${remoteJid}: ${formatTriggerRate(triggerRate)}`);
           withGroupLock(remoteJid, async () => {
             try {
               await handleModelCommand(configHolder, groupConfig, remoteJid, text, msg);
@@ -889,7 +1034,14 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         }
 
         if (msg.key.id) trackTriggered(msg.key.id);
-        console.log(`Chat triggered by ${senderName}: ${text}`);
+        const triggerRate = markTriggerRateMessage(
+          remoteJid,
+          groupConfig,
+          msg.key.id ?? undefined,
+          deterministicTriggered ? 'direct' : 'context',
+        );
+        console.log(`Chat triggered by ${senderName} (${deterministicTriggered ? 'direct' : 'context'}): ${text}`);
+        console.log(`[chat] Trigger share for ${remoteJid}: ${formatTriggerRate(triggerRate)}`);
         console.log(`[chat] Rate limit admitted for ${remoteJid}: ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
 
         const canGenerateDirectVideos = !!configHolder.current.global.geminiApiKey
@@ -959,8 +1111,12 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         if (messageId) updateMessageText(remoteJid, messageId, enrichedText);
         maybeRefreshProfiles(config, remoteJid);
         if (!groupConfig) continue;
+        recordInboundTriggerRateMessage(remoteJid, groupConfig, messageId ?? undefined);
 
-        // Check triggers: prefix or @mention (no reply check for edits)
+        const senderJid = update.key.participant ?? update.key.remoteJid ?? '';
+        const triggerSenderName = senderJid;
+
+        // Check triggers: prefix, @mention, or contextual classifier (no reply check for edits)
         const mentionedJids = extractMentionedJids({ message: editedMessage });
         const botJid = sock.user?.id;
         const botLid = sock.user?.lid;
@@ -970,13 +1126,19 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         );
         const prefixTriggered = isPrefixTrigger(text, botAliases);
 
-        if (!mentionTriggered && !prefixTriggered) continue;
+        const deterministicTriggered = mentionTriggered || prefixTriggered;
+        const contextualTriggered = deterministicTriggered
+          ? false
+          : await evaluateContextualTrigger(configHolder, groupConfig, remoteJid, text, triggerSenderName, ' (edit)');
+        if (!deterministicTriggered && !contextualTriggered) continue;
         const explicitImageRequest = isExplicitImageRequest(text);
         const explicitVideoRequest = isExplicitVideoRequest(text);
         const modelCommand = parseModelCommand(text);
 
         if (modelCommand) {
           console.log(`[chat] Model command triggered for ${remoteJid} (edit): ${text}`);
+          const triggerRate = markTriggerRateMessage(remoteJid, groupConfig, messageId ?? undefined, 'direct');
+          console.log(`[chat] Trigger share for ${remoteJid} (edit): ${formatTriggerRate(triggerRate)}`);
           withGroupLock(remoteJid, async () => {
             try {
               await handleModelCommand(configHolder, groupConfig, remoteJid, text);
@@ -1002,9 +1164,14 @@ export function setupChatHandler(configHolder: ConfigHolder): void {
         }
 
         if (messageId) trackTriggered(messageId);
-        const senderJid = update.key.participant ?? update.key.remoteJid ?? '';
-        const triggerSenderName = senderJid;
-        console.log(`[chat] Edit triggered by ${senderJid}: ${text}`);
+        const triggerRate = markTriggerRateMessage(
+          remoteJid,
+          groupConfig,
+          messageId ?? undefined,
+          deterministicTriggered ? 'direct' : 'context',
+        );
+        console.log(`[chat] Edit triggered by ${senderJid} (${deterministicTriggered ? 'direct' : 'context'}): ${text}`);
+        console.log(`[chat] Trigger share for ${remoteJid} (edit): ${formatTriggerRate(triggerRate)}`);
         console.log(`[chat] Rate limit admitted for ${remoteJid} (edit): ${limitDecision.count}/${limitDecision.limit} replies in ${Math.round(limitDecision.windowMs / 1000)}s`);
 
         const canGenerateDirectVideos = !!configHolder.current.global.geminiApiKey
