@@ -164,7 +164,7 @@ const triggerRateEventsByGroup = new Map<string, TriggerRateEvent[]>();
 const TRIGGER_RATE_MIN_SAMPLE = 20;
 
 type ContextualTriggerPersistentState = {
-  groups?: Record<string, { lastTriggeredAt?: number }>;
+  groups?: Record<string, { lastTriggeredAt?: number; messagesSinceLastTriggered?: number }>;
 };
 
 let contextualTriggerPersistentState: ContextualTriggerPersistentState | null = null;
@@ -215,10 +215,33 @@ function getContextualTriggerCooldownRemainingMs(groupJid: string, groupConfig: 
   return Math.max(0, cooldownMs - (Date.now() - lastTriggeredAt));
 }
 
+function getContextualTriggerMinMessagesBetween(groupConfig: GroupConfig): number {
+  return Math.max(0, groupConfig.chatbot?.contextualTriggerMinMessagesBetween ?? 100);
+}
+
+function getMessagesSinceLastContextualTrigger(groupJid: string): number {
+  const state = loadContextualTriggerPersistentState();
+  const count = state.groups?.[groupJid]?.messagesSinceLastTriggered;
+  return Number.isFinite(count) && count != null ? Math.max(0, Math.floor(count)) : 0;
+}
+
+function recordContextualTriggerObservedMessage(groupJid: string): void {
+  const state = loadContextualTriggerPersistentState();
+  if (!state.groups) state.groups = {};
+  const groupState = state.groups[groupJid] ?? {};
+  groupState.messagesSinceLastTriggered = Math.max(0, Math.floor(groupState.messagesSinceLastTriggered ?? 0)) + 1;
+  state.groups[groupJid] = groupState;
+  saveContextualTriggerPersistentState();
+}
+
 function recordContextualTriggerCooldown(groupJid: string): void {
   const state = loadContextualTriggerPersistentState();
   if (!state.groups) state.groups = {};
-  state.groups[groupJid] = { lastTriggeredAt: Date.now() };
+  state.groups[groupJid] = {
+    ...state.groups[groupJid],
+    lastTriggeredAt: Date.now(),
+    messagesSinceLastTriggered: 0,
+  };
   saveContextualTriggerPersistentState();
 }
 
@@ -256,6 +279,7 @@ function recordInboundTriggerRateMessage(groupJid: string, groupConfig: GroupCon
     return;
   }
   events.push({ messageId, timestamp: Date.now(), triggered: false });
+  recordContextualTriggerObservedMessage(groupJid);
   const { windowMessages } = getTriggerRateSettings(groupConfig);
   const maxStored = Math.max(windowMessages, 1000);
   if (events.length > maxStored) {
@@ -473,6 +497,16 @@ async function evaluateContextualTrigger(
     console.log(
       `[chat] Contextual trigger suppressed for ${remoteJid}${sourceLabel}: ` +
       `cooldown active for ${formatDuration(cooldownRemainingMs)}`,
+    );
+    return false;
+  }
+
+  const minMessagesBetween = getContextualTriggerMinMessagesBetween(groupConfig);
+  const messagesSinceLast = getMessagesSinceLastContextualTrigger(remoteJid);
+  if (messagesSinceLast < minMessagesBetween) {
+    console.log(
+      `[chat] Contextual trigger suppressed for ${remoteJid}${sourceLabel}: ` +
+      `${messagesSinceLast}/${minMessagesBetween} messages since last contextual reply`,
     );
     return false;
   }

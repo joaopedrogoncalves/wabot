@@ -480,6 +480,10 @@ export function startWebServer(
         if (!isNaN(contextualTriggerCooldownMinutes)) {
           group.chatbot.contextualTriggerCooldownMinutes = Math.max(0, Math.min(10080, contextualTriggerCooldownMinutes));
         }
+        const contextualTriggerMinMessagesBetween = parseInt(req.body.contextualTriggerMinMessagesBetween, 10);
+        if (!isNaN(contextualTriggerMinMessagesBetween)) {
+          group.chatbot.contextualTriggerMinMessagesBetween = Math.max(0, Math.min(10000, contextualTriggerMinMessagesBetween));
+        }
         group.chatbot.systemPrompt = req.body.systemPrompt || group.chatbot.systemPrompt;
         const allowedModelIds = parseSelectedModelIds(req.body.allowedModelIds);
         const knownModelIds = new Set(configHolder.current.global.chatModels.map((model) => model.id.toLowerCase()));
@@ -628,6 +632,10 @@ export function startWebServer(
         const contextualTriggerCooldownMinutes = parseInt(req.body.contextualTriggerCooldownMinutes, 10);
         if (!isNaN(contextualTriggerCooldownMinutes)) {
           g.chatbot.contextualTriggerCooldownMinutes = Math.max(0, Math.min(10080, contextualTriggerCooldownMinutes));
+        }
+        const contextualTriggerMinMessagesBetween = parseInt(req.body.contextualTriggerMinMessagesBetween, 10);
+        if (!isNaN(contextualTriggerMinMessagesBetween)) {
+          g.chatbot.contextualTriggerMinMessagesBetween = Math.max(0, Math.min(10000, contextualTriggerMinMessagesBetween));
         }
         if (req.body.systemPrompt !== undefined) g.chatbot.systemPrompt = req.body.systemPrompt;
         g.chatbot.enableThinking = req.body.enableThinking === '1';
