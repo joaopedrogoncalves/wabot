@@ -29,6 +29,7 @@ const GREETING_PREFIXES = [
   'ola',
   'olá',
 ];
+const GLOBAL_BOT_ALIASES = ['bot', 'robot'];
 
 const IMAGE_REQUEST_TERMS = /\b(image|picture|pic|photo|meme|poster|illustration|drawing|art|avatar|wallpaper|imagem|foto|meme)\b/iu;
 const IMAGE_REQUEST_CUES = /\b(draw|generate|make|create|render|illustrate|paint|show|send|post|desenha|gera|cria|faz|manda|posta|mostra|ilustra|can you|could you|please|pls|quero|queria|pode)\b/iu;
@@ -50,7 +51,14 @@ function parseBotAliases(botName: string): string[] {
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean);
-  return aliases.length > 0 ? aliases : [botName.trim()].filter(Boolean);
+  const configuredAliases = aliases.length > 0 ? aliases : [botName.trim()].filter(Boolean);
+  const seen = new Set<string>();
+  return [...configuredAliases, ...GLOBAL_BOT_ALIASES].filter((alias) => {
+    const key = alias.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function escapeRegex(text: string): string {
